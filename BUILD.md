@@ -57,7 +57,7 @@ applied by its own script, then this repository's seven patches.  `llama-server`
 |---|---|---|
 | the llama.cpp checkout | `git rev-parse HEAD^{tree}` | `9d7b9a02f0864295926888b2ca0ea1f57e6d977d` (`release.json` field `base_tree`) |
 | `apply-all.sh` | `git rev-parse HEAD^{tree}` | `0104361a095f7463d52376a408b8a7863d83f2d7` (`release.json` field `tree`); the branch tip is commit `9d7c0502c9b023fc438044fd3ca2e7cfc47631f6` (field `tip`) |
-| the seven patches | `git add -A`, then `git write-tree` | `b6c4b59fa6931eec2396784280be0ac74237add7` |
+| the seven patches | `git add -A`, then `git write-tree` | `cbc8d50f488d287182caf92cb01f3c49a3fc3282` |
 
 `git apply` leaves the new files untracked, so the last check stages everything first (that changes no file).  A build
 folder named `build*` at the top is ignored by llama.cpp's `.gitignore`; check before configuring if it lives elsewhere
