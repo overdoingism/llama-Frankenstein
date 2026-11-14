@@ -1,7 +1,7 @@
 # Windows build for gfx1201 (Radeon AI PRO R9700 / RX 9070 series): llama.cpp + llama-cpp-rdna-boosts + this repository's
 # patches, built with the ROCm 10.0.0 SDK for Windows (TheRock), packaged with the ROCm runtime DLLs, the hipBLASLt kernels for
 # gfx1201 and the licenses; a SHA-256 file and a build provenance attestation (`gh attestation verify <zip> --repo
-# overdoingism/llama-cpp-overdoing`) go with it.  No GPU is needed to build.  Written with Claude (AI).
+# overdoingism/llama-Frankenstein`) go with it.  No GPU is needed to build.  Written with Claude (AI).
 name: windows-gfx1201
 
 on:
@@ -9,7 +9,7 @@ on:
     inputs:
       rdna_boosts:
         description: "llama-cpp-rdna-boosts release tag the patches are applied on"
-        default: "v16-6050b467c-r195"
+        default: "v17-a691b2345-r277"
   push:
     branches: [ci-windows]
 
@@ -19,7 +19,7 @@ permissions:
   attestations: write
 
 env:
-  RB_TAG: ${{ inputs.rdna_boosts || 'v16-6050b467c-r195' }}
+  RB_TAG: ${{ inputs.rdna_boosts || 'v17-a691b2345-r277' }}
   ROCM_URL: https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx120X-all-10.0.0.tar.gz
   ROCM_SHA256: 75da73c483cbc0456d9008f2079b333f4f9d3b7744705378ff8007e502ca38c5
 
@@ -49,7 +49,7 @@ jobs:
           git -C llama.cpp checkout --quiet "$BASE"
           cd llama.cpp
           bash ../rdna-boosts/scripts/apply-all.sh .
-          for p in ../overdoing/patches/0*-605-*.patch; do
+          for p in ../overdoing/patches/J?-a69-*.patch; do
             echo "applying $(basename "$p")"
             git apply "$p"
           done
@@ -68,7 +68,7 @@ jobs:
           Remove-Item $tar
           "ROCM_ROOT=$root" | Out-File -Append $env:GITHUB_ENV
 
-      - uses: ilammy/msvc-dev-cmd@v1   # rc.exe and the Windows SDK libraries
+      - uses: ilammy/msvc-dev-cmd@v1   # rc.exe, mt.exe (the linker embeds an app manifest) and the Windows SDK libraries
 
       - name: Configure and build
         shell: pwsh
@@ -99,7 +99,7 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: overdoing\packaging\windows\package.ps1 -Build build\bin -Rocm $env:ROCM_ROOT -Out dist -Name "llama-cpp-overdoing-$env:RB_TAG-win-gfx1201"
+        run: overdoing\packaging\windows\package.ps1 -Build build\bin -Rocm $env:ROCM_ROOT -Out dist -Name "llama-Frankenstein-$env:RB_TAG-win-gfx1201"
 
       - uses: actions/attest-build-provenance@v2
         with:
@@ -107,7 +107,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: llama-cpp-overdoing-${{ env.RB_TAG }}-win-gfx1201
+          name: llama-Frankenstein-${{ env.RB_TAG }}-win-gfx1201
           path: |
             dist/*.zip
             dist/*.sha256

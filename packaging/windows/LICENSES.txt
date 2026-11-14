@@ -10,10 +10,10 @@ The llama.cpp programs also print their embedded licenses with --license.
 
 
 ----------------------------------------------------------------------------------------------------------------------
-1. llama-cpp-overdoing (this package's patches and build)
+1. llama-Frankenstein (this package's patches and build)
    Covers:  the llama.cpp programs and DLLs in this package
    License: MIT
-   Source:  github.com/overdoingism/llama-cpp-overdoing LICENSE
+   Source:  github.com/overdoingism/llama-Frankenstein LICENSE
 ----------------------------------------------------------------------------------------------------------------------
 
 MIT License

@@ -1,167 +1,154 @@
-# llama-cpp-overdoing
+# Llama-Frankenstein
 
-Extra patches for [llama-cpp-rdna-boosts](https://github.com/stew675/llama-cpp-rdna-boosts) on AMD RDNA4 (gfx1201, Radeon AI PRO R9700),
-for the changes that are **not** part of rdna-boosts: mostly lossy prefill speed-ups, a faster decode / draft-verification
-matmul, a guard against replies that end inside the reasoning, an opt-in lenience for sampled drafts, faster wide draft
-verification, a smaller recurrent-state cache for draft verification, and a smaller FFN compute buffer.
-Most other bit-identical work goes to rdna-boosts itself.
-Patches only; MIT.  Written with Claude (AI).
+Patches for [llama-cpp-rdna-boosts](https://github.com/stew675/llama-cpp-rdna-boosts) on AMD RDNA4 (gfx1201, Radeon AI PRO
+R9700).  They sew techniques from published papers onto llama.cpp and rdna-boosts, a body sewn together from the parts of
+others: hence the name.  The optimizations target dense models: on a MoE model the experts' matmuls stay on the
+rdna-boosts paths, and only the parts outside them gain.
 
-## Patches
-
-File names: `<serial>-<upstream base>-<name>-v<version>.patch`.  The files in `patches/` are for rdna-boosts
-`v16-6050b467c-r195` (upstream base `6050b467c`).
-
-| patch | what | switch | type |
-|---|---|---|---|
-| `0001-605-k1-v7` | K-quant prefill matmuls via hipBLASLt | `GGML_LF_KQ_BLAS`<br>(default on, fp8) | speed/<br>lossy |
-| `0002-605-f8-v7` | fp8 prefill attention | `GGML_LF_FA_FP8`<br>(default on) | speed/<br>lossy |
-| `0003-605-m4-v4` | MXFP4 weights to fp8 for `0001` | `GGML_LF_MXFP4_DIRECT`<br>(default on) | speed/<br>lossy |
-| `0004-605-reasoning-guard-v2` | no reply left inside the reasoning | `LLAMA_REASONING_GUARD`<br>(default on) | guard |
-| `0005-605-state-bands-v1` | saving and restoring a slot above 256 MiB through the fast batched path | `LLAMA_STATE_ASYNC_BANDS`<br>(default on, one device) | speed |
-| `0006-605-mmvk-v4` | faster 1-8 token K-quant matmuls | `GGML_CUDA_MMVK`<br>(default on) | speed/<br>diff |
-| `0007-605-spec-lenience-v1` | keep more sampled-draft tokens | `LLAMA_SPEC_LENIENCE`<br>(default off) | speed/<br>lossy |
-| `0008-605-glu-inplace-v1` | an FFN's gate, up and GLU output not all live at once (150 MiB less compute buffer at `-ub 2048`) | `GGML_GLU_INPLACE`<br>(default on) | memory |
-| `0009-605-fa-band-split-v1` | faster 9-16 row draft verification | `GGML_CUDA_FA_BAND_SPLIT`<br>(default on) | speed/<br>diff |
-| `0012-605-dflash-adaptive-width-v2` | DFlash2 verify width from the acceptance | `LLAMA_DFLASH_ADAPTIVE`<br>(default on) | speed |
-| `0013-605-gdn-verify-anchor-v4` | Qwen3.x draft verification keeps two recurrent-state planes, not one per draft token (about 1 GiB less VRAM) | `LLAMA_RS_ANCHOR`<br>(default on);<br>`GGML_CUDA_GDN_NT`<br>(default on) | speed |
-| `0014-605-ngram-prompt-only-v2` | n-gram drafts from the current prompt only, with a key check: for rewriting whole files | `LLAMA_SPEC_NGRAM_PROMPT_ONLY`<br>(default on, with `ngram-mod`) | speed/<br>trade-off |
-| `0015-605-spec-align-v4` | slots verifying together send drafts of one length | `LLAMA_SPEC_ALIGN`,<br>`LLAMA_SPEC_ALIGN_CUT`<br>(default on) | speed |
-
-<sub>0010, 0011 (Temporarily)</sub>
-
-What each patch does, what it needs, the types, and the change log: [PATCHES.md](PATCHES.md).
-
-Every patch can be turned off with its switch; left unset, all are on except `0007`, and `GGML_LF_ALL=0` turns off every
-switch left unset ([SWITCHES.md](SWITCHES.md)).
-Prefill speed-ups measured on Linux, R9700, Qwen3.8-27B UD-Q4_K_XL, DFlash2 draft, 8K / 32K prompt, on `v16-a55e952b8-r8`; `0001` v7 is
-faster since (+7.8 % at depth 0, +4.7 % at 32K on 2048-token batches, the same output); KLD measured on r144 ([2026-10-27 report](reports/2026-10-27.md)):
-
-| | prefill | KLD vs official UD-Q5_K_M on r144 (zh / en) |
+| code from | license | what it gave |
 |---|---|---|
-| reference (no patch) | — | 0.0018 / 0.0006 (run-to-run floor) |
-| K1 f16 | +14% / +15% | 0.0018 / 0.0005 (≈ floor) |
-| K1 fp8 (the default) | +16% / +22% on top of f16 | 0.0026 / 0.0007 |
-| F8 (v5) | +3% / +17% | 0.0018 / 0.0005 |
-| M4 (MXFP4 models only) | +55% at 8K, +44% at 110K | +0.002 / +0.0006 over the MXFP4 weights themselves |
-| mmvk (`0006`) | — (decode: 4.5-6% less time per step with drafts) | 0.0015 / 0.0003 (below the floor) |
-| **all defaults** | | **0.0025 / 0.0009** |
+| [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) | MIT | the engine |
+| [llama-cpp-rdna-boosts](https://github.com/stew675/llama-cpp-rdna-boosts) | MIT | the RDNA4 base these patches apply to; its decode-attention band and KQ block table (J1), grid-stall padding (J3) |
 
-K1, F8 and M4 leave decode unchanged; `0006` changes decode only (for its KLD the decode path runs it at one token, `GGML_CUDA_MMVK=4`).  K1 `fp8` with F8 also raises the perplexity of the prompt's own logits (every position scored on the prefill path):
-by 0.1-0.3% on new text in Chinese, English or Thai and on a German novel, 0.6-0.8% on texts the model knows by heart, and
-2.4-3.6% on a text it half-remembers (Hong Lou Meng, our Chinese test text; this note used to read that as a Chinese
-effect).  Generation reads the prompt through the KV cache and sees far less (the KLD column; Thai at the level of Chinese
-and English).  For prompt-scoring workloads set `GGML_LF_KQ_BLAS=f16`.  Details: [2026-10-12 report](reports/2026-10-12.md).
+The papers each part follows, and thanks: [STRUCTURE.md](STRUCTURE.md).  Patches only; MIT.  Written with Claude (AI).
 
-F8 v5 counts the row sum from the fp8 probabilities themselves: on a 170K-token reasoning conversation F8's own KLD drops by
-a fifth (0.000396 to 0.000307, floor 0.00021); with all defaults the change is below the floor, at the same prefill speed
-([report](reports/2026-10-27.md#0002-v5-the-row-sum-of-f8)).  On the table's 48K test v5 is within the floor of v4 (F8 alone
-0.0019 / 0.0007 with v4; all defaults 0.0024 / 0.0008 with v4).  F8 v6 gives the same output as v5 (LDS-only barriers, and
-the WMMAs of two accumulators issued in turn where that is faster): F8's kernel +2.7..+4.3 % on Qwen3.8-27B's shape,
-prefill +0.5 % at 32K and +0.6 % at 110K ([change log](PATCHES.md#change-log)); v7 is v6 with the same machine code.
+## Structure
 
-`0009` changes only draft-verification batches of 9-16 rows (two slots verifying at once, or a long n-gram draft), which
-neither the KLD run nor the standard benchmark has; each of those rows then gets the result a batch of 8 rows or fewer gives.
-Two slots decoding at once at 50K each: 13-19% slower than one after the other without it, 33-38% faster with it.
+The main pipeline has been rebuilt.  This repo's earlier patches (0001-0015) and a new GPU-resident speculative pipeline
+are merged into seven groups, one patch each, numbered in the order of inference and applied in that order:
 
-`0008`: the graph allocator lets a GLU write into its gate's memory, so an FFN's gate, up and GLU output are no longer all
-live at once: at `-ub 2048` the compute buffer is 150 MiB smaller on Qwen3.8-27B and 70 MiB on Qwen3.6-35B-A3B.  The output
-is the same, and prefill speed did not change.
+| group | part of the engine | what changes | type |
+|---|---|---|---|
+| J1 | attention | the full-attention layers' KV cache and every kernel that reads it: fp8 prefill attention, a `q8_0r` cache with a batch-invariant decode / verify kernel, 9-16 row verification through the decode kernel | speed/lossy, speed |
+| J2 | prefill | large-batch matmuls in fp8 through hipBLASLt (K-quant and MXFP4 weights), the GLU written in place, fused Gated DeltaNet prefill, the logits a prompt ends with from a decode-sized batch | speed/lossy, memory, speed, fix |
+| J3 | decode / verify | 1-16 token matmuls; Gated DeltaNet draft verification with two state planes instead of one per draft token; fused decode ops; the draft model's output layer scored from an int2 copy, its best candidates recomputed exactly | speed/diff, memory, speed |
+| J4 | sampling | an end of turn sampled inside the reasoning becomes the reasoning's end tag | guard |
+| J5 | speculative decoding | the draft width from the acceptance, drafts of one length for slots verifying together, n-gram drafts from the prompt, an opt-in lenience for sampled drafts | speed, speed/trade-off, sampling |
+| J6 | step issue | the speculative loop on the GPU: sampling, draft acceptance and the next step's input on the device, two sequences in one step | speed |
+| J7 | state between requests | prompt cache and context checkpoints in pinned memory, saved in the background, cut on the batch grid | speed |
 
-`0013` (`LLAMA_RS_ANCHOR=0` turns the anchor off): draft verification on qwen35 / qwen35moe models (Qwen3.5 to 3.8) keeps, per slot, the
-recurrent state before and after the last batch plus small per-token replay factors, instead of one full state per draft
-token, and replays the accepted part when a draft is partly rejected.  The output is the same.  Qwen3.8-27B with DFlash2:
-1.03 GiB less VRAM with 2 slots, 0.51 GiB with 1 (`-c 131072`); each decode step 0.3-0.4% faster, two slots decoding at
-once 2-4% faster.
+What each group contains, its switches, sources and references, the lossy parts with their KLD, and the change log:
+[STRUCTURE.md](STRUCTURE.md).
 
-## Switches
+## Performance
 
-Every switch, its values, and the server parameters it needs: [SWITCHES.md](SWITCHES.md).
+Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the command under
+[Run and switches](#run-and-switches).
 
-On Linux we also set ROCm's own `HSA_USERPTR_FOR_PAGED_MEM=0`.  By default ROCm allocates pinned host memory
-(`hipHostMalloc`, llama.cpp's `ROCm_Host` buffers) as ordinary pageable pages registered with the GPU; when the kernel swaps out
-or moves one of them (memory pressure, compaction), the driver stops all GPU queues of the process until the page is
-back (5-440 ms at a time, often several in a row).  With `0` those buffers are allocated by the driver instead and cannot be
-swapped or moved.  Under the same memory pressure: 23 stalls (1.16 s in total over 19 requests) became none, with the
-same output and speed ([report](reports/2026-10-27.md#linux-gpu-stalls-under-memory-pressure)).  The cost: those
-buffers (about 0.7 GB with every layer on the GPU) stay in RAM; with large weights left in host memory (partial offload
-without mmap) they count against the driver's limit.  Not needed on Windows.
+| prompt | prefill t/s | decode t/s | KLD, generation (zh / en) | KLD, prompt processing (zh / en) |
+|---|---|---|---|---|
+| 8K | 2938 | 71.0 | 0.0043 (1.6×) / 0.0026 (3.3×) | 0.038 (4.8×) / 0.0075 (5.3×) |
+| 32K | 2742 | 63.5 | 0.0043 (1.7×) / 0.0007 (1.7×) | 0.037 (5.2×) / 0.0027 (3.9×) |
 
-## Applicable versions
+- Speed: a public-domain novel (PG-19 #4047, *The Leavenworth Case*) and a request for a review, 8,163 and 32,709 tokens;
+  prefill without the prompt cache, decode 512 greedy tokens with the DFlash2 draft; median of 3 rounds after a warm-up
+  (the rounds gave the same tokens; spread under 0.6 %).  Measured 2026-11-13.
+- KLD: the mean per token (without the largest one) over 400 teacher-forced tokens after an 8K / 32K prefix of a Chinese and
+  an English text, against the same build with every switch off.  That build is plain rdna-boosts: its 512 decoded tokens
+  are the same as stock r269's with the draft, and its KLD to stock r269 is 0.  On r277 (rdna-boosts' r270-r277 change
+  multi-GPU all-reduce, host-resident MoE and loading, nothing on this path) the set gave the same tokens and log-probs as on
+  r269 and the same time per step (2026-11-14; the 32K prompt: 2738 / 63.0).  In brackets, the multiple of the floor: the
+  same comparison for one bit of K changed in an emulated build, at the same batch width.  Generation: batches of 1, 6 and
+  16 tokens (decode, DFlash2 verification, n-gram verification), the one furthest above its floor; here always 1 and 6,
+  which give the same bits.  Prompt processing: one 400-token batch, as in tools that score every token of a prompt (a
+  reply's first token comes from a decode-sized batch: the prompt tail, J2).  Floor, generation: 0.0028 / 0.0008 (8K),
+  0.0026 / 0.0004 (32K); prompt processing: 0.0079 / 0.0014 (8K), 0.0071 / 0.0007 (32K).
 
-Tested on rdna-boosts `v16-6050b467c-r195`: the patches in `patches/` apply in number order on the plain release, build, and
-give the History numbers.  On another release, check with `git apply --check`
-first.  A release on a new upstream base (not `6050b467c`) needs a new patch set.
+### History
 
-## History
+| date | build | prefill 8K / 32K | decode 8K / 32K | KLD 32K, generation / prompt processing (zh / en) |
+|---|---|---|---|---|
+| 2026&#8209;11&#8209;01 | [llama-cpp-overdoing](https://github.com/overdoingism/llama-Frankenstein/blob/edef875/README.md): `v16-6050b467c-r195` + K1&nbsp;v7, F8&nbsp;v5, M4&nbsp;v4, mmvk&nbsp;v4 | — / 2510 | — / 59.4 | — |
+| 2026&#8209;11&#8209;13 | J1-J7 on `v17-a691b2345-r269` | 2938 / 2742 | 71.0 / 63.5 | 0.0043 / 0.0007; 0.037 / 0.0027 |
 
-Speed on the standard benchmark (Qwen3.8-27B, 32K-token prompt, R9700, Linux), tokens/s.  `original`: plain rdna-boosts.
-Each dated row: this repo's patches of that date, all on, on the release it names (or else the `original` above it); the date links to
-the report (setup and KLD).
+The 2026-11-01 row is the last one of this repo's earlier form (then named llama-cpp-overdoing): the same 32K prompt, a
+`q8_0` KV cache.
 
-| date | build | Q5 prefill | Q5 decode | MXFP4 prefill | MXFP4 decode |
-|---|---|---|---|---|---|
-| original | `v16-a55e952b8-r8` | 983 | 47.4 | 1151 | 54.7 |
-| [2026&#8209;10&#8209;07](reports/2026-10-07.md) | + K1&nbsp;v2, F8&nbsp;v3.1, M4&nbsp;v2 | **1958** | 47.5 | **2393** | **63.0** |
-| [2026&#8209;10&#8209;12](reports/2026-10-12.md) | + K1&nbsp;v3, F8&nbsp;v3.2, M4&nbsp;v2 | **1954** | 49.0 | **2388** | **62.9** |
-| [2026&#8209;10&#8209;13](reports/2026-10-13.md) | `v16-097cf33d9-r50` + K1&nbsp;v3, F8&nbsp;v3.2, M4&nbsp;v2 | **1959** | 50.6 | **2397** | **66.2** |
-| [2026&#8209;10&#8209;15](reports/2026-10-15.md) | `v12-097cf33d9-r59` + K1&nbsp;v3.2, F8&nbsp;v3.3, M4&nbsp;v2 | **2197** | 50.4 | **2365** | **66.2** |
-| [2026&#8209;10&#8209;18](reports/2026-10-18.md) | `v12-097cf33d9-r59` + K1&nbsp;v3.2, F8&nbsp;v3.3, M4&nbsp;v2, mmvk&nbsp;v2 | **2207** | **53.8** | **2389** | **67.2** |
-| original | `v15-6050b467c-r156` | 1155 | 52.8 | 1384 | 57.9 |
-| [2026&#8209;11&#8209;01](PATCHES.md#change-log) | `v16-6050b467c-r195` + K1&nbsp;v7, F8&nbsp;v5, M4&nbsp;v4, mmvk&nbsp;v4 (the defaults) | **2510** | **59.4** | **2531** | **61.2** |
+## Reproduction conditions
 
-Q5 = official UD-Q5_K_M; MXFP4 = FreedomAISVR MXFP4.
+What follows records how the numbers above were obtained (the pinned sources, the build, the command and the switches) so
+that the measurements can be repeated.  It is not a recommendation to run these patches, and no binaries are published
+here.
 
-## Build
+### Build
 
-- [Linux](BUILD-linux.md)
-- [Windows](BUILD-windows.md)
-- Then: [run](#run), [switches](SWITCHES.md)
+| what | pinned at |
+|---|---|
+| llama.cpp | commit `a691b2345844ce1b430201fc5fd404ce062e05f2` |
+| llama-cpp-rdna-boosts | release `v17-a691b2345-r277`, commit `dc6bb7f04b5ff635a9249e465294fe6eb6d1074e`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v17-a691b2345-r277` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
+| this repository | the seven patches in [`patches/`](patches), all of them, J1 to J7 in that order |
+| ROCm | 10.0.0 with hipBLASLt, the HIP code compiled for gfx1201 |
 
-## Run
+The method, the principles, a tree hash to check after each stage and the pitfalls, for Linux and Windows:
+[BUILD.md](BUILD.md).  It states conditions to meet rather than a script, for a person or an AI agent.  A group alone is
+not guaranteed to build: turn parts off with their switches instead.  On another release check with `git apply --check`
+first; a release on a new llama.cpp base needs a new set.  The [GitHub Actions workflow](.github/workflows/windows-gfx1201.yml)
+can build a Windows package when run by hand (none is published here), with
+[`run-server-sample.ps1`](packaging/windows/run-server-sample.ps1): the command below, with the two model paths to fill in.
 
-The patches are on by default; each can be turned off with its switch.  Speculative decoding needs a draft model and
-these server parameters.  An example command, the one behind the measurements here (R9700, Qwen3.8-27B, Linux; on
-Windows the same in PowerShell, without `HSA_USERPTR_FOR_PAGED_MEM` and with `--poll 0`):
+Tested on gfx1201 only.  On RDNA3 the RDNA4 paths stay off: use rdna-boosts itself.  gfx1200 (RX 9060 XT) takes them but is
+untested (build with `GPU_TARGETS=gfx1200`).
+
+### Run and switches
+
+The command behind the [Performance](#performance) numbers (Linux; on Windows the same in PowerShell, without
+`HSA_USERPTR_FOR_PAGED_MEM`):
 
 ```bash
-HSA_USERPTR_FOR_PAGED_MEM=0 ./llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -ngl 99 -c 131072 --kv-unified \
-  -ub 2048 -b 2048 -fa on -ctk q8_0 -ctv q8_0 \
+HSA_USERPTR_FOR_PAGED_MEM=0 ./llama-server -m Qwen3.8-27B-UD-Q5_K_M.gguf -ngl 99 -c 131072 --kv-unified \
+  -ub 2048 -b 2048 -fa on -ctk q8_0r -ctv q8_0r \
   -md Qwen3.8-27B-DFlash2-Q4_K_M.gguf -ngld 99 --spec-draft-n-max 5 \
   --spec-type draft-dflash \
   --spec-draft-sampling probabilistic
 ```
 
-- `-ub 2048 -b 2048 -fa on -ctk q8_0 -ctv q8_0`: K1 and F8, the prefill speed-ups, need them
-  ([SWITCHES.md](SWITCHES.md#server-parameters-they-need)).
-- `-md ... -ngld 99 --spec-draft-n-max 5`: the DFlash2 draft model, for Qwen3.8-27B only
-  ([z-lab/Qwen3.8-27B-DFlash2-GGUF](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF), Q4_K_M).  With any other
-  model leave out the last three lines.
-- `--spec-type draft-dflash`: DFlash2 drafts.  `0014` acts only with an n-gram type
-  ([SWITCHES.md](SWITCHES.md#server-parameters-they-need)).
-- `--spec-draft-sampling probabilistic`: llama.cpp's own; sampled drafts, verified exactly by rejection sampling (it
-  matters at temperature > 0).  `0007` (`LLAMA_SPEC_LENIENCE`, lossy, off by default) builds on it.
-- `HSA_USERPTR_FOR_PAGED_MEM=0`: Linux only ([Switches](#switches)).
-- `--poll 0`: Windows.  The Windows build has no OpenMP, so llama.cpp's own CPU thread pool spins after the CPU part of
-  every step: on a Ryzen 7 5700G with an R9700 the server used 4.2-4.4 cores while generating, 0.85-0.91 with
-  `--poll 0`, at the same speed and with the same text.  The Linux build uses OpenMP and does not need it.
-- The [GitHub Actions workflow](.github/workflows/windows-gfx1201.yml) can build a Windows package when it is run by hand
-  (no package is published here); it includes [`run-server-sample.ps1`](packaging/windows/run-server-sample.ps1): these
-  settings, with the two model paths to fill in.
+| parameter | why |
+|---|---|
+| `-ub 2048 -b 2048` | J2's prefill matmuls are fastest on 2048-token batches (and take small weights only from 1024 tokens).  The compute buffer grows by about 1.1 MiB per ubatch token: lower it (e.g. 1536) if a long context does not fit. |
+| `-fa on -ctk q8_0r -ctv q8_0r` | J1's `q8_0r` cache (the same memory as `q8_0`) and its decode / verify kernel.  The fp8 prefill attention runs on `q8_0r` and `q8_0`, the 9-16 row halves only on `q8_0`.  A layer whose head size is not a multiple of 256 (the DFlash2 draft model's) keeps `q8_0` and logs it. |
+| `-md ... -ngld 99 --spec-draft-n-max 5`, `--spec-type draft-dflash` | The DFlash2 draft model, for Qwen3.8-27B only ([z-lab/Qwen3.8-27B-DFlash2-GGUF](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF), Q4_K_M).  The adaptive width, the int2 draft head and the GPU-resident loop act only with it; mmvk's default and the Gated DeltaNet verification act with any drafts.  With any other model leave out the last three lines. |
+| `--spec-draft-sampling probabilistic` | llama.cpp's own: sampled drafts, verified exactly by rejection sampling (it matters at temperature > 0).  J5's lenience (lossy, off by default) builds on it. |
+| `--spec-type ngram-mod,draft-dflash --spec-ngram-mod-n-max 15 --spec-ngram-mod-n-match 30` | Not in the command above.  J5's n-gram drafts from the prompt act only with an n-gram type, put before DFlash2; with them the n-min defaults to 1. |
+| `--poll` | Nothing to set.  Windows builds have no OpenMP, so at llama.cpp's default `--poll 50` the CPU thread pool would spin after the CPU part of every step (4.2-4.4 cores on a Ryzen 7 5700G while generating, 0.85-0.91 at 0, the same speed and text): J6 makes `--poll 0` the default there. |
 
-## Use
+**Environment.**  `HSA_USERPTR_FOR_PAGED_MEM=0` is ROCm's own variable, Linux only.  By default ROCm allocates pinned host
+memory (`hipHostMalloc`, llama.cpp's `ROCm_Host` buffers) as pageable pages registered with the GPU; when the kernel swaps
+out or moves one (memory pressure, compaction), the driver stops every GPU queue of the process until the page is back
+(5-440 ms at a time, often several in a row).  With `0` the driver allocates them instead and they stay put: under the same
+memory pressure, 23 stalls (1.16 s over 19 requests) became none, with the same output and speed.  The cost: those buffers
+(about 0.7 GB with every layer on the GPU) stay in RAM, and with large weights in host memory (partial offload without
+mmap) they count against the driver's limit.
 
-These patches are offered for research and evaluation.  Every patch can be turned off with its switch
-([SWITCHES.md](SWITCHES.md)).  Users are responsible for checking the rights that apply where they use them.
+**Switches.**  Every part has an environment variable, read once at startup.  Everything is on by default, the lossy K1,
+F8 and M4 included (they are part of what the numbers above measure), except the parts marked opt-in.  `0` turns a part
+off; `FRANK_ALL=0` turns off every part that changes values or the order of work, and that build is the KLD reference
+above.  Every switch, its values and its default: [SWITCHES.md](SWITCHES.md).
 
-本 repo 的 patch 供研究與評估。每個 patch 都能用它的開關關掉（[SWITCHES.md](SWITCHES.md)）。使用者請自行確認所在地適用的權利。
+**What to check at run time:**
+
+- The startup log shows `mmvk on (...)`, `FRANK_KQ_BLAS: hipBLASLt found; K1 prefill GEMM in fp8` and
+  `K1 warm-up (2048 tokens, ...): fp8 GEMM ready for 8 shapes`, and with the draft model
+  `int2 coarse head for output.weight (...)`.  `hipBLASLt has no ... kernels` means hipBLASLt did not find its gfx1201
+  kernels and K1 stays off ([BUILD.md](BUILD.md#pitfalls)).
+- K1 is on by default only when every GPU the program sees is a gfx1201, and J3's int2 draft head and J6's loop only with
+  one GPU: if HIP also sees a CPU's integrated GPU (`found 2 ROCm devices`), hide it with `HIP_VISIBLE_DEVICES`.
+- Two things sit outside `--fit`: J3's int2 draft head (about 0.4 GiB with the DFlash2 draft model) and J6's loop
+  (0.13 GiB).  On Windows a device allocation that does not fit does not fail: it lands in shared GPU memory and everything
+  slows down (the first prefill is far below its usual speed).  Task Manager's shared GPU memory also counts pinned host
+  memory, which is RAM, not spilled VRAM: J7's prompt-cache and checkpoint pools (about 13 GiB with this command) and the
+  mapped token embedding (0.8 GiB).
+
+## Notice
+
+These patches are offered for research and evaluation.  Every part can be turned off with its switch
+([SWITCHES.md](SWITCHES.md)).  Code from other projects is credited under its license in the file headers and in
+[STRUCTURE.md](STRUCTURE.md), which also lists the papers each part follows.
 
 ## Thanks
 
-To stew675 and the rdna-boosts contributors, and to the llama.cpp / ggml community.
+To stew675 and the rdna-boosts contributors, to Deadcode and the radiance contributors, and to the llama.cpp / ggml
+community.  The authors of the papers we follow are listed in [STRUCTURE.md](STRUCTURE.md).
 
 ## Note
 
 Issues and pull requests may not get an answer here.  For problems, try a frontier cloud model first.
-
-本 repo 不一定會回應 issue 與 PR。遇到問題，建議先請雲端前沿模型協助處理。

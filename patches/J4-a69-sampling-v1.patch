@@ -1,23 +1,5 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: overdoingism <overdoingism@users.noreply.github.com>
-Date: Tue, 27 Oct 2026 05:40:20 +0800
-Subject: [PATCH] common: reasoning guard v2, on by default
- (LLAMA_REASONING_GUARD=0 turns it off)
-
-An end-of-generation token sampled inside the reasoning block is replaced by
-the block's end tag, so the model goes on to write the answer instead of
-ending the turn with the answer left in the reasoning and the content empty.
-On by default (LLAMA_REASONING_GUARD=0 or GGML_LF_ALL=0 turns it off).  Tokens before that point are sampled as before; backend
-sampling, speculative verification (match and rejection) and grammars keep
-their paths.  Only a single-token end tag is supported.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
----
- common/sampling.cpp | 117 ++++++++++++++++++++++++++++++++++++++++++--
- 1 file changed, 114 insertions(+), 3 deletions(-)
-
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index da77044b7..6b6bebc0b 100644
+index da77044b7..58fddf90c 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
 @@ -320,8 +320,60 @@ struct common_sampler {
@@ -25,7 +7,7 @@ index da77044b7..6b6bebc0b 100644
      std::vector<llama_token> fast_bias_ids = {};                 // S2: the biased tokens, sorted, unique
      std::vector<std::pair<float, llama_token>> fast_top = {};    // S2: scratch
 +
-+    // reasoning guard (LLAMA_REASONING_GUARD=1): an end-of-generation token sampled inside the reasoning block is
++    // reasoning guard (FRANK_REASONING_GUARD=1): an end-of-generation token sampled inside the reasoning block is
 +    // replaced by the block's end tag.  Ending the turn there leaves the answer inside the reasoning and the content
 +    // empty; with the tag the model goes on and writes the answer.  Nothing changes before that point: the token was
 +    // sampled as usual, and only an end of generation inside the block is replaced.
@@ -86,11 +68,11 @@ index da77044b7..6b6bebc0b 100644
      }
  
 +    {
-+        // LLAMA_REASONING_GUARD: on unless set to 0 (unset with GGML_LF_ALL=0: off)
++        // FRANK_REASONING_GUARD: on unless set to 0 (unset with FRANK_ALL=0: off)
 +        static const bool on = [] {
-+            const char * e = getenv("LLAMA_REASONING_GUARD");
++            const char * e = getenv("FRANK_REASONING_GUARD");
 +            if (e != nullptr) return atoi(e) != 0;
-+            const char * a = getenv("GGML_LF_ALL");
++            const char * a = getenv("FRANK_ALL");
 +            return !(a != nullptr && a[0] == '0' && a[1] == '\0');
 +        }();
 +        // one token is emitted in place of one token: the last token of the first end tag, when that token is an end tag
@@ -108,7 +90,7 @@ index da77044b7..6b6bebc0b 100644
 +                    rguard_track(result, t);
 +                }
 +                if (!logged) {
-+                    LOG_INF("%s: reasoning guard on (LLAMA_REASONING_GUARD): an end of generation inside the reasoning block "
++                    LOG_INF("%s: reasoning guard on (FRANK_REASONING_GUARD): an end of generation inside the reasoning block "
 +                            "is replaced by the end tag (token %d)\n", __func__, result->rguard_end);
 +                }
 +            } else if (!logged) {
@@ -202,6 +184,3 @@ index da77044b7..6b6bebc0b 100644
          common_sampler_accept(gsmpl, id, true);
          result.push_back(id);
  
--- 
-2.43.0
-

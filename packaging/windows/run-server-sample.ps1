@@ -12,8 +12,6 @@ $draftPath = "C:\models\Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
 # ---- the settings of the measurements ----
 $PSNativeCommandUseErrorActionPreference = $false
 $here = $PSScriptRoot
-# hipBLASLt does not find its kernels by itself on Windows: the gfx1201 folder of this package
-$env:HIPBLASLT_TENSILE_LIBPATH = Join-Path $here "gfx1201"
 
 $llamaArgs = @(
     "--model", $modelPath
@@ -21,16 +19,14 @@ $llamaArgs = @(
     "--ctx-size", "131072"
     "--parallel", "1"
     "--kv-unified"
-    # K1 (fp8 prefill) is fastest at 2048-token batches; F8 (fp8 prefill attention) needs flash attention and a q8_0 KV cache
+    # K1 (fp8 prefill) is fastest at 2048-token batches; J1's q8_0r KV cache (its decode / verify kernel, and the fp8 prefill
+    # attention) needs flash attention
     "-ub", "2048"
     "-b", "2048"
     "--flash-attn", "on"
-    "--cache-type-k", "q8_0"
-    "--cache-type-v", "q8_0"
+    "--cache-type-k", "q8_0r"
+    "--cache-type-v", "q8_0r"
     "--jinja"
-    # this build has no OpenMP: llama.cpp's own CPU thread pool spins after the CPU part of every step unless it is told
-    # not to (Ryzen 7 5700G: about 4.3 cores while generating, 0.9 with --poll 0, at the same speed)
-    "--poll", "0"
     "--host", "127.0.0.1"
     "--port", "8080"
 )
@@ -50,7 +46,6 @@ $llamaArgs += @($args | Where-Object { $_ -ne "-DryRun" })
 foreach ($f in @($modelPath, $draftPath) | Where-Object { $_ }) {
     if (-not (Test-Path $f)) { Write-Host "not found: $f  (fill in the paths at the top of $(Split-Path -Leaf $PSCommandPath))"; exit 1 }
 }
-Write-Host "HIPBLASLT_TENSILE_LIBPATH=$env:HIPBLASLT_TENSILE_LIBPATH"
 Write-Host ("llama-server.exe " + (($llamaArgs | ForEach-Object { if ("$_" -match '\s') { '"' + $_ + '"' } else { "$_" } }) -join ' '))
 if ($dry) { exit 0 }
 & (Join-Path $here "llama-server.exe") @llamaArgs

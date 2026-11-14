@@ -1,155 +1,153 @@
 # Switches
 
-Written with Claude (AI).  Every switch is an environment variable, read once when `llama-server` starts.  **The patches are
-on by default** (the default is under each variable): to turn one off, set it to `0`.  `GGML_LF_ALL=0` makes every switch you leave unset
-default to off; the build then behaves like plain rdna-boosts, apart from 0005 (a faster copy of large states, the same bytes).  `0007` is
-the exception: off unless you ask for it (it is lossy).  Set the variables in the shell that starts the server (`NAME=value` before
-the command in bash, `$env:NAME = "value"` in PowerShell).
+Written with Claude (AI).  Every switch is an environment variable, read once when `llama-server` starts.  **Everything is on
+by default** (the default is under each variable) except the parts marked opt-in: to turn a part off, set its variable to
+`0`.  `FRANK_ALL=0` turns off every part that changes values or the order of work ([below](#turning-everything-off)).  Set
+the variables in the shell that starts the server (`NAME=value` before the command in bash, `$env:NAME = "value"` in
+PowerShell).  An on / off switch reads any number but `0` as on, and `0`, an empty value or text as off, unless its row says
+otherwise.  The command the README's numbers were measured with, and the server parameters the parts need:
+[README](README.md#run-and-switches).  The groups and what their parts do: [STRUCTURE.md](STRUCTURE.md); the lossy parts
+and their KLD: [STRUCTURE.md](STRUCTURE.md#lossy-parts).
 
 ## Main switches
 
-| variable | patch | values | what it does |
-|---|---|---|---|
-| `GGML_LF_KQ_BLAS`<br>(default `fp8` when every GPU is a gfx1201; otherwise off) | 0001 K1 | `fp8`, `f16`, `0` | Prefill matmuls of quantized weights (not MXFP4; dense layers, not MoE experts) through hipBLASLt.  `fp8`: weights and activations in fp8, the fastest.  `f16`: weights converted to f16, KLD at the floor.  Batches of 384 tokens or more on weights of 20M elements or more, 1024 tokens or more on smaller weights (below that their fixed cost loses to MMQ).  The default needs the built-in gfx1201 algorithm lists; on other GPUs set it explicitly (the choice is then timed at startup and can change between runs). |
-| `GGML_LF_KQ_BLAS_FP8_KEEP`<br>(default `64`) | 0001 K1 | a number; `0` = off | K1 `fp8` only: per input batch, the channels with the largest activations (up to 248, rounded up to a multiple of 8) get a second fp8 term for their weight and activation rounding errors, appended to the same GEMM.  About half of the fp8 error above `f16` goes away for about 1% of prefill speed. |
-| `GGML_LF_DRAFT_UB`<br>(default `512`) | 0001 K1 | a number; `0` = no cap | Caps the draft model's ubatch (only ever lowers it).  With `-ub 2048`, `512` saves about 0.7 GiB of VRAM. |
-| `GGML_LF_FA_FP8`<br>(default on) | 0002 F8 | `1`, `0` | Prefill flash attention in fp8.  Runs only on RDNA4, with `-fa on` and a q8_0 KV cache (`-ctk q8_0 -ctv q8_0`), on batches of 32 tokens or more over 512 or more KV cells. |
-| `GGML_LF_MXFP4_DIRECT`<br>(default `blaslt`) | 0003 M4 | `blaslt`, `0` | MXFP4 weights only: prefill converts them exactly to fp8 and runs 0001's fp8 GEMM.  Batches of 64 tokens or more.  (`fp8` and `f16` select older kernels, a little slower.) |
-| `LLAMA_REASONING_GUARD`<br>(default on) | 0004 | `1`, `0` | When the model samples an end of turn inside its reasoning block, the block's end tag (`</think>`) is emitted instead and generation goes on, so the answer lands in the reply instead of the reasoning.  Nothing before that point changes; it never shortens the reasoning, and a reply cut by `max_tokens` is left as it is.  When it fires the model usually writes its answer again after the reasoning (leave room in `max_tokens`), and the log prints `emitting the end tag`.  Needs a template whose reasoning end tag ends with one token (Qwen's `</think>`); otherwise the log says it is off. |
-| `GGML_CUDA_MMVK`<br>(default `2`) | 0006 mmvk | `0`-`4` | Q4_K / Q5_K / Q6_K matmuls of 1 to 8 tokens (decode and speculative verification) run a kernel that keeps the activations in registers across several weight rows.  `2`: also launches the matmuls that read the same input (gate + up, q + k + v, DeltaNet qkv + z) as one kernel; `1`: one launch each (same numbers, about 1% slower).  `1` and `2` are on only when llama-server verifies speculative drafts (a draft model, MTP or an n-gram type): one-token decode alone is 1-1.6% faster on the stock kernel.  `3` / `4` are the same, always.  Silent on a GPU it does not run on (RDNA4 only).  The server log prints `mmvk on (...)` or `mmvk off (...)`.  Not bit-identical to the stock kernel (float summation order); decode and verification give the same results as each other. |
-| `GGML_CUDA_MMVK_EXT`<br>(default `1`) | 0006 mmvk | bit mask | `1`: groups may mix weight types.  `2`: IQ4_XS / IQ4_NL / MXFP4 through mmvk too (their stock kernel is already close to the bandwidth limit; normally leave it). |
-| `LLAMA_SPEC_LENIENCE`<br>(default off, `1`) | 0007 | a number between 0 and 1 | **Lossy.**  With sampled drafts (llama.cpp's own `--spec-draft-sampling probabilistic`) and a request temperature above 0, a drafted token is accepted with probability min(1, p / (l·q)) instead of min(1, p / q); the rest of the verification is unchanged, so no token becomes more than 1/l times as likely as under the model.  The request field `spec_lenience` sets it per request.  Has no effect at temperature 0 or with greedy drafts.  See the [2026-10-27 report](reports/2026-10-27.md) for what `0.8663` did to speed and quality. |
-| `GGML_GLU_INPLACE`<br>(default on) | 0008 | `1`, `0` | The graph allocator may give a GLU (SwiGLU, GEGLU, ...) the memory of its gate when nothing else reads the gate, so an FFN's gate, up and GLU output are not all live at once: 150 MiB less compute buffer at `-ub 2048` on Qwen3.8-27B.  Same output. |
-| `GGML_CUDA_FA_BAND_SPLIT`<br>(default on) | 0009 | `1`, `0` | RDNA4: a draft-verification batch of 9 to 16 query rows (two slots of a unified KV cache verifying at once, or an n-gram draft longer than 7) runs its attention as two halves of at most 8 rows through the decode / verify kernel instead of the generic one.  Each row gets the result a batch of 8 rows or fewer gives (not bit-identical to the generic kernel).  Only with `-fa on`, from `GGML_CUDA_FA_BAND_SPLIT_MIN_KV` KV cells (default `8192`; `0` = any length): below that the two launches cost more than they save. |
-| `LLAMA_DFLASH_ADAPTIVE`<br>(default on) | 0012 | `1`, `2`, `0` | DFlash2 drafts each sequence's own width (from 3 to `--spec-draft-n-max`) from running acceptance estimates; the output does not change.  `2` also logs the width changes and, per request, the verifications per width.  `0`: the fixed width.  `LLAMA_DFLASH_ADAPTIVE_COST` (`0.035`) and `LLAMA_DFLASH_ADAPTIVE_JUMP` (`0.08`) are the constants of its fixed cost model; nothing is timed while running. |
-| `GGML_CUDA_GDN_NT`<br>(default on) | 0013 | `1`, `0` | The Gated DeltaNet verify kernel (qwen35 / qwen35moe, draft verification) reads the recurrent state and writes its per-token snapshots with non-temporal hints, so they do not push the next matmuls' weights out of the cache.  Same values. |
-| `LLAMA_RS_ANCHOR`<br>(default on) | 0013 | `1`, `0` | qwen35 / qwen35moe with drafts: each slot keeps two recurrent-state planes (after its last batch, and the one that batch started from) and the batch's per-token replay factors instead of one full state per draft token; a partly rejected draft is replayed from the start state.  Same output; about 1 GiB less VRAM with 2 slots (0.5 GiB with 1), slightly faster.  Needs every recurrent layer on the CPU or a CUDA / ROCm GPU (otherwise the log says it is off).  Before v3 (0013 v2) it was off unless set to `1`. |
-| `LLAMA_SPEC_NGRAM_PROMPT_ONLY`<br>(default on) | 0014 | `1`, `0` | Only with `ngram-mod`.  Each sequence looks up n-gram drafts only in its current prompt, in its own table with a key check; generated tokens are not added.  `0`: upstream's shared table without the check. |
-| `LLAMA_STATE_ASYNC_BANDS`<br>(default on with one device) | 0005 | `1`, `0` | A state above `LLAMA_STATE_ASYNC_MAX_MIB` (256) is copied through the pinned stage one band at a time.  `0`: the per-tensor path.  `1`: forced on, also on several devices, where a `-sm tensor` split may not serve the windows. |
-| `GGML_LF_KQ_BLAS_ADD`<br>(default on) | 0001, 0003 | `1`, `0` | The residual ADD after a matmul K1 or M4 takes goes into the GEMM.  The same output. |
-| `LLAMA_SPEC_ALIGN`<br>(default on) | 0015 | `1`, `0` | Hybrid / recurrent models only: sequences that verify drafts in the same batch send drafts of one length (DFlash2's adaptive width aligns up to the others, up to `--spec-draft-n-max`; a longer draft is cut to the shortest), so the verify batch is not split into ubatches.  From r154 rdna-boosts reads the same variable for its own alignment of `draft-mtp-adaptive`: `0` turns off both; with `GGML_LF_ALL=0` and the variable unset, ours is off and the release's stays on. |
-| `LLAMA_SPEC_ALIGN_CUT`<br>(default on) | 0015 v2 | `1`, `0` | The cut of the drafts of one call to the shortest one, and the raise of DFlash2's width to a draft another drafter already made, which it relies on.  `0`: unequal drafts are left to the ubatch split, as in the release (rdna-boosts measured the cut as a loss where an n-gram draft is short because of its content; here it removes a mismatch of two caps, a copying slot's 15-token n-gram draft next to DFlash2's block). |
-
-0001-0003 do not touch decode and draft verification: their batches are below every minimum above.  0006 and 0009 are only
-for them.  0007 changes only how sampled drafts are accepted; 0012, 0014 and 0015 only what is drafted.
-
-## Server parameters they need
-
-| parameter | why |
-|---|---|
-| `-ub 2048 -b 2048` | K1 is fastest on large batches (2048), and needs at least 1024 tokens on small weights.  The main model's compute buffer grows by about 1.1 MiB per ubatch token: lower it (e.g. 1536) if a long context does not fit. |
-| `-fa on -ctk q8_0 -ctv q8_0` | F8 runs only on a q8_0 KV cache with flash attention. |
-| `--spec-type ngram-mod,draft-dflash --spec-ngram-mod-n-max 15 --spec-ngram-mod-n-min 1 --spec-ngram-mod-n-match 30` | Only for 0014: an n-gram type before DFlash2.  Without it 0014 does nothing; the example command has none. |
-| `--spec-draft-sampling probabilistic` | Only for 0007.  llama.cpp's own parameter: sample the draft and verify it by rejection sampling (exact).  Faster on sampled code / math at temperature 0.7-1.0, can be slower at low temperature: measure on your own workload. |
-
-The example command (draft model): [README](README.md#run).
-
-## Turning everything off
-
-`GGML_LF_ALL=0`: every unset switch above defaults to off.  A switch you set still wins (e.g. `GGML_LF_ALL=0 GGML_LF_FA_FP8=1`
-turns on F8 alone).
-
-## Algorithm choice (normally unset)
+### J1 attention
 
 | variable | values | what it does |
 |---|---|---|
-| `GGML_LF_KQ_BLAS_ALGOS` | unset, `def.gfx1201v1`, `K1a2.<...>`, `tune`, `0` | K1 `f16`: how hipBLASLt algorithms are picked.  Unset: the built-in gfx1201 list (`def.gfx1201v1`; other GPUs: `tune`).  `K1a2.<...>`: reuse a table the log printed earlier.  `tune`: time the candidates at startup (about 9 s; the choice, and so the output, can change between runs).  `0`: hipBLASLt's own first choice.  The log prints the table in use as `GGML_LF_KQ_BLAS_ALGOS=K1a2.<...>`. |
-| `GGML_LF_MXFP4_ALGOS` | unset, `heur`, `timed` | The fp8 GEMM (K1 `fp8` and M4).  Unset: the built-in gfx1201 fp8 list.  `heur`: hipBLASLt's first choice.  `timed`: time the candidates on the first full batch (can change between runs). |
-| `GGML_LF_KQ_BLAS_CHUNK_MB` | a number | Converts weights in pieces of that many MB.  Saves only about 150 MB of VRAM; prefill gets slower (about 9% on Windows) and the output changes.  Not recommended. |
+| `FRANK_FA_FP8`<br>(default on, RDNA4) | `1`, `0` | **Lossy.**  Prefill flash attention in fp8, from a `q8_0` cache (head 64 / 128 / 256) or a `q8_0r` cache (head 256): batches of 32 tokens or more over 512 or more KV cells, GQA 1-8, no sinks / ALiBi / softcap.  Where it runs (every GPU RDNA4) it also makes rdna-boosts' `GGML_CUDA_FA_STAGE_MAX_MB` default to 1 ([related](#related-not-from-this-repo)). |
+| `FRANK_FA_Q8R`<br>(default on) | `1`, `0` | The decode / verify attention kernel of the `q8_0r` KV cache (`-ctk q8_0r -ctv q8_0r`): head 256, GQA up to 6, 1-31 query rows, RDNA4.  Its split points are fixed, so decoding a token and verifying it in a draft give the same numbers.  `0`: the op runs on f16 copies of K and V instead.  Not bit-identical to the `q8_0` kernels (within the floor). |
+| `FRANK_FA_BAND_SPLIT`<br>(default on) | `1`, `0` | With a `q8_0` cache on RDNA4: a draft-verification batch of 9-16 query rows (two slots of a unified KV cache verifying at once, or a long n-gram draft) runs as two halves of at most 8 rows through the decode / verify kernel instead of the generic one; each row gets the result a batch of 8 rows or fewer gives (not bit-identical to the generic kernel).  From `FRANK_FA_BAND_SPLIT_MIN_KV` KV cells (`8192`; `0` = any length).  A `q8_0r` cache does not need it (its kernel takes up to 31 rows). |
+
+### J2 prefill
+
+| variable | values | what it does |
+|---|---|---|
+| `FRANK_KQ_BLAS`<br>(default `fp8` when every GPU is a gfx1201; otherwise off) | `fp8`, `f16`, `0` | Prefill matmuls of quantized weights (not MXFP4; dense layers, not MoE experts) through hipBLASLt (K1).  `fp8`: **lossy**, the fastest.  `f16`: weights converted to f16, KLD near the floor, slower.  Batches of 384 tokens or more on weights of 20M elements or more, 1024 or more on smaller weights; decode and draft verification never reach it.  Any other value (also `1`) logs a warning and leaves K1 off; an empty value counts as unset.  On other GPUs set it explicitly (the f16 algorithms are then timed at startup and can change between runs). |
+| `FRANK_KQ_BLAS_FP8_KEEP`<br>(default `64`) | a number, `0`-`248`; `0` = off | K1 `fp8` only: per input batch, the channels with the largest activations (rounded up to a multiple of 8) get a second fp8 term for their weight and activation rounding errors, in the same GEMM.  About half of the fp8 error above `f16` goes away for about 1% of prefill speed.  Weights with 1024 or more inputs. |
+| `FRANK_KQ_BLAS_ADD`<br>(default on) | `1`, `0` | The residual ADD after a matmul K1 or M4 takes goes into the GEMM.  The same output.  Off while `FRANK_MXFP4_ALGOS=timed`, and for K1 `f16` while its algorithms are timed. |
+| `FRANK_MXFP4_DIRECT`<br>(default `blaslt`, RDNA4) | `blaslt`, `0` | **Lossy.**  MXFP4 weights only (M4): prefill converts them exactly to fp8 and runs K1's fp8 GEMM.  Batches of 64 tokens or more.  `fp8` and `f16` select older kernels, a little slower; any other value (also `1` or empty) logs a warning and leaves M4 off. |
+| `FRANK_PP_TAIL`<br>(default on) | `1`, `0` | The prompt tail: a ubatch of 384 tokens or more (`FRANK_PP_TAIL_MIN`) that ends a sequence with tokens that need logits gives those tokens back to a small ubatch, so the logits a prompt ends with (a reply's first token) come from the decode-sized path, not from K1.  Batches with logits for every token (perplexity) are unchanged. |
+| `FRANK_GLU_INPLACE`<br>(default on) | `1`, `0` | The graph allocator may give a GLU (SwiGLU, GEGLU, ...) the memory of its gate when nothing else reads the gate, so an FFN's gate, up and GLU output are not all live at once: 136 MiB less compute buffer at `-ub 2048` on Qwen3.8-27B.  Same output. |
+| `FRANK_DRAFT_UB`<br>(default `512`) | a number; `0` = no cap | Caps the draft model's ubatch (only ever lowers it).  With `-ub 2048`, `512` saves about 0.7 GiB of VRAM. |
+| `FRANK_KQ_BLAS_FIXED`<br>(opt-in, default `0`) | `0`, `1`, `2` | **Lossy, beyond K1's own error.**  K1 `fp8` only: per matmul input, the KEEP channels and the activation scale are fixed after a calibration instead of measured on every batch, and the layer before writes the fp8 activations itself; prefill a few percent faster.  `1`: each input's first 4 batches calibrate (`FRANK_KQ_BLAS_FIXED_N`).  `2`: whole prompts calibrate; an input is fixed at the first decode step after 2 batches or 2048 tokens.  No effect when K1 is not `fp8`. |
+| `FRANK_KQ_BLAS_GLU16`<br>(opt-in, default off) | `f16` (or `1`), `0` | **Lossy, one more rounding.**  K1 `fp8` only: a gate / up matmul read only by its GLU writes 16-bit products, which the GLU reads.  Pays only together with `FRANK_KQ_BLAS_FIXED`. |
+
+### J3 decode / verify
+
+| variable | values | what it does |
+|---|---|---|
+| `FRANK_MMVK`<br>(default `2`) | `0`-`4` | Q4_K / Q5_K / Q6_K matmuls of 1 to 8 tokens (decode and draft verification) run a kernel that keeps the activations in registers across several weight rows.  `2`: also launches the matmuls that read the same input (gate + up, q + k + v, DeltaNet qkv + z) as one kernel; `1`: one launch each (same numbers, about 1% slower).  `1` and `2` are on only when llama-server verifies drafts (a draft model, MTP or an n-gram type): one-token decode alone is 1-1.6% faster on the stock kernel.  `3` / `4` are the same, always.  RDNA4 only.  The log prints `mmvk on (...)` or `mmvk off (...)`.  Not bit-identical to the stock kernel (float summation order); decode and verification give the same results as each other. |
+| `FRANK_MMVK_EXT`<br>(default `1`) | bit mask | `1`: grouped launches may mix weight types (bit-identical to same-type groups).  `2`: IQ4_XS / IQ4_NL / MXFP4 through mmvk too (values change; their stock kernel is already close to the bandwidth limit, so normally leave it). |
+| `FRANK_RS_ANCHOR`<br>(default on) | `1`, `0` | qwen35 / qwen35moe with drafts: each slot keeps two recurrent-state planes (after its last batch, and the one that batch started from) and per-token replay factors instead of one full state per draft token; a partly rejected draft is replayed.  Same output; about 1 GiB less VRAM with 2 slots (0.5 GiB with 1).  Off (with a log line) when a recurrent layer is on a device other than the CPU or a CUDA / ROCm GPU. |
+| `FRANK_GDN_NT`<br>(default on) | `1`, `0` | The Gated DeltaNet verify kernel reads the recurrent state and writes its per-token snapshots with non-temporal hints, so they do not push the next matmuls' weights out of the cache.  Same values. |
+| `FRANK_HEAD_INT2`<br>(default on with one GPU, an RDNA4 one) | `1`, `0` | The DFlash2 draft model's output layer is scored from an int2 copy of its weight; the best 512 of each column (`FRANK_HEAD_INT2_R`) are recomputed through mmvk, bit for bit as the plain path computes them.  When the true top 16 is not among them, only that draft changes, never the verified output.  About 2% less time per step; about 0.4 GiB more VRAM, **outside `--fit`** (if it cannot be allocated, the plain path stays and the log says so).  Acts only where mmvk runs (with `FRANK_MMVK=0` it builds no copy).  `1` forces it with several GPUs. |
+
+### J4 sampling
+
+| variable | values | what it does |
+|---|---|---|
+| `FRANK_REASONING_GUARD`<br>(default on) | `1`, `0` | When the model samples an end of turn inside its reasoning block, the block's end tag (`</think>`) is emitted instead and generation goes on, so the answer lands in the reply instead of the reasoning.  Nothing before that point changes; it never shortens the reasoning, and a reply cut by `max_tokens` is left as it is.  When it fires the model usually writes its answer again after the reasoning (leave room in `max_tokens`), and the log prints `emitting the end tag`.  Needs a template whose reasoning end tag ends with one token (Qwen's `</think>`); otherwise the log says it is off. |
+
+### J5 speculative decoding
+
+| variable | values | what it does |
+|---|---|---|
+| `FRANK_DFLASH_ADAPTIVE`<br>(default on) | `1`, `2`, `0` | DFlash2 drafts each sequence's own width (from 3 to `--spec-draft-n-max`) from running acceptance estimates and a fixed cost model; the output does not change.  `2` also logs the width changes and, per request, the verifications per width.  `0`: the fixed width.  Cost constants: [tuning](#tuning-normally-unset). |
+| `FRANK_SPEC_ALIGN`<br>(default on) | `1`, `0` | Hybrid / recurrent models only: sequences that verify drafts in the same batch send drafts of one length (DFlash2's width rises to the widest, a longer draft is cut to the shortest), so the verify batch is not split into ubatches.  rdna-boosts' own `LLAMA_SPEC_ALIGN` controls only its `draft-mtp-adaptive`. |
+| `FRANK_SPEC_ALIGN_CUT`<br>(default on) | `1`, `0` | The cut to the shortest draft, and the raise of DFlash2's width to a draft another drafter already made, which it relies on.  `0`: unequal drafts are left to the ubatch split, as in the release. |
+| `FRANK_SPEC_NGRAM_PROMPT_ONLY`<br>(default on) | `1`, `0` | Only with `ngram-mod`.  Each sequence looks up n-gram drafts only in its current prompt, in its own table with a key check; generated tokens are not added.  With it, `--spec-ngram-mod-n-min` defaults to 1 (any draft the table gives is used).  `0`: upstream's shared table without the check (and its n-min default). |
+| `FRANK_SPEC_LENIENCE`<br>(opt-in, default `1` = exact) | a number between 0 and 1 | **Lossy.**  With sampled drafts (llama.cpp's own `--spec-draft-sampling probabilistic`) and a request temperature above 0, a drafted token is accepted with probability min(1, p / (l·q)) instead of min(1, p / q); the rest of the verification is unchanged, so no token becomes more than 1/l times as likely as under the model.  The request field `frank_spec_lenience` sets it per request.  No effect at temperature 0 or with greedy drafts.  What `0.8663` did to speed and quality: [STRUCTURE.md](STRUCTURE.md#lossy-parts). |
+
+### J6 step issue
+
+| variable | values | what it does |
+|---|---|---|
+| `FRANK_STEP_LOOP`<br>(default on with one GPU, a ROCm one; off with several GPUs) | `1`, `0` | The GPU-resident speculative loop: with a draft model, each step's sampling, draft acceptance (with the reasoning guard, lenience and the Gated DeltaNet verification), the next input and the KQ mask are made on the device, and the steps replay captured graphs.  Per step 5.7-5.9% faster at 8K and 110K on Linux, 6.2-7.7% at 8K-110K on Windows.  Greedy output is the same as on the host path; at temperature > 0 a token can change, as it can between two host-path runs.  With several GPUs it is untested, so it stays off unless you set `1`.  It needs some VRAM outside `--fit` (0.13 GiB with the mapped token embedding, 0.95 GiB without, on Qwen3.8-27B). |
+| `FRANK_STEP_LOOP_SEQ2`<br>(default on) | `1`, `0` | With the loop: two sequences are verified in one step. |
+| `FRANK_DEVICE_INPUT_MAPPED`<br>(default on) | `1`, `0` | With the loop: the token embedding stays in pinned host memory that the GPU reads in place, so its lookup runs in the GPU graph without a VRAM copy (0.66 GiB less VRAM on Qwen3.8-27B).  Same bytes. |
+| `FRANK_GRAPH_MAX_TOKENS`<br>(default `16`) | a number | The most tokens a host-path batch may have and still be captured as a HIP graph (the release: 8).  The same kernels; copying with an n-gram draft is about 3% faster per step. |
+| `FRANK_RS_WHOLE_BATCH`, `FRANK_STEP_AHEAD`<br>(opt-in, default off) | `1`, `0` | The loop issues the next step before the last one is committed, and drops it whole when the request stops; the recurrent memory then also allows a rollback of a whole batch.  Either variable set to `1` turns both on; `FRANK_STEP_AHEAD=1` with `FRANK_RS_WHOLE_BATCH=0` stays off (with a warning).  Off by default: one step at a time was as fast at 8K and 1.6% faster per step at 32K and 110K. |
+
+### J7 state between requests
+
+| variable | values | what it does |
+|---|---|---|
+| `FRANK_STATE_ASYNC_BANDS`<br>(default on with one device) | `1`, `0` | A state above rdna-boosts' `LLAMA_STATE_ASYNC_MAX_MIB` (256) is copied through the pinned stage one band at a time instead of tensor by tensor.  Same bytes.  `1` forces it with several devices, where a `-sm tensor` split may not serve the bands. |
+| `FRANK_SERVER_CKPT_ASYNC`<br>(default on) | `1`, `0` | Context checkpoints are copied to host memory on a worker thread; every task waits for the copy before it touches the slot. |
+| `FRANK_SERVER_CACHE_PINNED`, `FRANK_SERVER_CKPT_PINNED`<br>(default `100%` each) | `N%`, a number (MiB), `N%,MiB` (the smaller), `0` = off | At startup (on a background thread) the server allocates one pinned host-memory pool for the prompt cache (`N%` of `--cache-ram`) and for the context checkpoints (`N%` of all the checkpoints the context can hold), and saves and restores straight between them and the GPU.  **It takes host RAM**: with the README's command ([Run and switches](README.md#run-and-switches)) on Qwen3.8-27B, 8 GiB for the prompt cache and 5.3 GiB for the checkpoints, capped to the smaller of half the RAM minus 2 GiB and three quarters of the free RAM.  Same text and draft counts with the pools on and off. |
+| `FRANK_SERVER_CKPT_ALIGN`<br>(default on) | `1`, `0` | The checkpoint near the end of a prompt (4 + `n_ubatch` tokens before it) is made at the start of the batch that holds it, so a prompt is cut into batches only at the batch size, at user-message breaks and before its last 4 tokens: a request continued from the prompt cache gives the same output as one run from scratch.  `0`: the release's cut (the batches, and so a long prompt's numbers, depend on where the cache ends). |
+
+## Turning everything off
+
+`FRANK_ALL=0` (exactly `0`): every switch above that you leave unset defaults to off, so every part that changes values or
+the order of work is off; a switch you set still wins (`FRANK_ALL=0 FRANK_FA_FP8=1` turns on F8 alone).  What stays on is
+bit-identical: the fused kernels and A/B switches listed [below](#ab-switches-normally-unset), the shared KQ block table,
+the state copies in bands and in the background, and the pinned pools.  `FRANK_FA_Q8R` stays on too, but only acts on a
+`q8_0r` cache, which plain rdna-boosts does not have.  On r269, `FRANK_ALL=0` with a `q8_0` cache gave the same 512 decoded
+tokens as plain rdna-boosts with the draft model, and a KLD of 0 against it; on r277, the same three replies as plain
+rdna-boosts (2026-11-14).
+
+## Tuning (normally unset)
+
+| variable | default | what it does |
+|---|---|---|
+| `FRANK_KQ_BLAS_ALGOS` | built-in list on gfx1201 | K1 `f16` only: how hipBLASLt algorithms are picked.  `def.gfx1201v1`: the built-in gfx1201 list (refused on other GPUs, where the default is `tune`).  `K1a2.<...>`: reuse a table the log printed earlier.  `tune`: time the candidates at startup (about 9 s; the choice, and so the output, can change between runs).  `0`: hipBLASLt's own first choice.  The log prints the table in use as `FRANK_KQ_BLAS_ALGOS=K1a2.<...>`. |
+| `FRANK_MXFP4_ALGOS` | built-in gfx1201 fp8 list | Every fp8 GEMM (K1 `fp8` and M4).  `heur`: hipBLASLt's first choice.  `timed`: time the candidates on the first full batch (can change between runs; turns the residual ADD into the GEMM off). |
+| `FRANK_KQ_BLAS_GLU16_ALGOS` | built-in | The 16-bit-output fp8 GEMM of `FRANK_KQ_BLAS_GLU16`: `heur` or `timed`. |
+| `FRANK_KQ_BLAS_CHUNK_MB` | `0` (whole) | K1 `f16` only: converts weights in pieces of that many MB.  Saves little VRAM; prefill gets slower and the output changes.  Not recommended. |
+| `FRANK_KQ_BLAS_MIN_T` (384; f16: 640, at least 256), `FRANK_MXFP4_MIN_T` (64), `FRANK_FA_FP8_MIN_T` (32), `FRANK_FA_FP8_MIN_KV` (512), `FRANK_PP_TAIL_MIN` (384), `FRANK_FA_BAND_SPLIT_MIN_KV` (8192) | in brackets | The smallest batch (tokens) or KV length each path takes.  K1's applies to weights of 20M elements or more (smaller ones: at least 1024). |
+| `FRANK_KQ_BLAS_FIXED_N` (4), `_FIXED_MIN_B` (2), `_FIXED_MIN_T` (2048), `_FIXED_MARGIN` (1.0) | in brackets | `FRANK_KQ_BLAS_FIXED`: calibration batches in mode 1; batches and tokens before an input is fixed in mode 2; a factor on the calibrated scale. |
+| `FRANK_FA_FP8_QB` | `4` | F8, head 256: how many 16-token groups of a block share one K / V tile (`2` or `4`; anything else 1).  Bit-identical. |
+| `FRANK_FA_Q8R_SPLIT` | `24` | `q8_0r` kernel: KV splits per head.  Another value gives other split points, so other numbers. |
+| `FRANK_HEAD_INT2_R` | `512` | Candidates recomputed exactly per column (16-4096). |
+| `FRANK_DFLASH_ADAPTIVE_COST` (0.035; 0.018 with `q8_0r`), `_JUMP` (0.08; 0.04), `_JUMP_ROWS` (5; 6) | in brackets | The adaptive width's cost model: the cost of one more verified position as a fraction of a step; the extra cost from `_JUMP_ROWS` rows at 110K, scaled with the context. |
+| `FRANK_STEP_KV_HEADROOM` | `1024` | With the loop and a `q8_0r` cache: verify graphs span that many free cells past the used ones, so the loop runs longer before handing back to the host.  `0` = off. |
+
+## A/B switches (normally unset)
+
+Each turns off one bit-identical change (or, for the M4 `fp8` mode, sets an experiment); `0` gives the earlier code path
+with the same output, for comparisons:
+`FRANK_FA_FP8_CONV`, `FRANK_FA_FP8_COMBINE4`, `FRANK_FA_Q8R_SW` (`2` = two staging warps), `FRANK_FA_KQ_BLOCKS_REUSE`,
+`FRANK_KQ_BLAS_SHARE`, `FRANK_KQ_BLAS_DIRECT`, `FRANK_KQ_BLAS_DIRECT_B32`, `FRANK_KQ_BLAS_FIXED_PRODUCER`,
+`FRANK_KQ_BLAS_FIXED_NOF32`, `FRANK_MXFP4_SHARE`, `FRANK_MXFP4_AMAX` / `FRANK_MXFP4_CONV` (`row` = the older kernel),
+`FRANK_FUSE_CONT_GATE_F32`, `FRANK_GDN_CONV_NORM_INPLACE`, `FRANK_GDN_BF16_IN`, `FRANK_GDN_NORM_SILU_FP8`,
+`FRANK_NORM_PAIR_WAVE`, `FRANK_NORM_ROWS_ROPE_FWHT`, `FRANK_ROPE_FWHT_WAVE`, `FRANK_DFLASH_CONV_FUSED`,
+`FRANK_FUSE_GDN_NORM_GATE_SILU`, `FRANK_RMS_Q8_1_REGS`, `FRANK_STEP_ONE_STREAM`, `FRANK_STEP_GRAPH_WIDE`,
+`FRANK_STEP_SLAB` (on whenever the loop is), `FRANK_SPEC_TRIGGER_STOP` (follows the loop), `FRANK_SERVER_CKPT_ALIGN_NEXT`.
+`FRANK_MXFP4_CFG` and `FRANK_MXFP4_SPLITK` are experiments of M4's `fp8` mode.  Do not set `FRANK_SLAB_SYNC=0`: it is
+racy (A/B only).
 
 ## Diagnostics (normally unset)
 
 | variable | what it does |
 |---|---|
-| `GGML_LF_KQ_BLAS_LOG=1`, `GGML_LF_MXFP4_LOG=1` | Print each GEMM shape's algorithm choice (K1) / one line per weight tensor (M4). |
-| `GGML_LF_KQ_BLAS_MIN_T` (384), `GGML_LF_FA_FP8_MIN_T` (32), `GGML_LF_FA_FP8_MIN_KV` (512), `GGML_LF_MXFP4_MIN_T` (64) | The minimum batch (tokens) or KV length each path takes; defaults in brackets.  K1's applies to weights of 20M elements or more (smaller ones: at least 1024); `1024` gives 0001 v4's behaviour. |
-| `GGML_LF_KQ_BLAS_DIRECT` (on), `GGML_LF_KQ_BLAS_CHECK` (off) | 0001 v6: Q4_K / Q5_K / IQ4_XS weights converted without the LDS round trip (the same bytes); `0` uses the older kernels.  `CHECK=1` runs both on every conversion and logs differing bytes (diagnostics, slow). |
-| `GGML_LF_KQ_BLAS_SHARE=0`, `GGML_LF_MXFP4_SHARE=0` | Convert the activations for every matmul instead of once per input: same result, slower. |
-| `GGML_LF_MXFP4_AMAX=row`, `GGML_LF_MXFP4_CONV=row` | Alternative kernels for the activation scale / the MXFP4 conversion: same result. |
-| `GGML_LF_MXFP4_CFG`, `GGML_LF_MXFP4_SPLITK` | Experiments for M4's `fp8` kernel. |
+| `FRANK_KQ_BLAS_LOG=1` (`2`: with timings) | One line per GEMM shape with its algorithm: K1 and every fp8 GEMM, M4's too. |
+| `FRANK_MXFP4_LOG=1` | Per MXFP4 weight on first use: the blocks outside the exact fp8 range (synchronizes). |
+| `FRANK_KQ_BLAS_CHECK=1` | Every weight conversion also runs the reference kernel and logs differing bytes (slow). |
+| `FRANK_FA_FP8_CONV_CHECK`, `FRANK_FA_FP8_ATTN_CHECK`, `FRANK_FA_FP8_COMBINE_CHECK`, `FRANK_FA_Q8R_COMBINE_CHECK`, `FRANK_FUSE_CONT_GATE_CHECK`, `FRANK_NORM_PAIR_WAVE_CHECK`, `FRANK_NORM_ROWS_ROPE_CHECK`, `FRANK_SSM_GATE_CHECK` | `1`: the fused or faster kernel is compared, bit for bit, with the one it replaces (testing only, slow). |
+| `FRANK_GDN_CONV_NORM_DEBUG`, `FRANK_GDN_NORM_SILU_FP8_DEBUG`, `FRANK_RS_ANCHOR_DEBUG` | `1`: log why a fusion was or was not taken. |
+| `FRANK_HEAD_INT2_CHECK=1` (`_CHECK_K`, 16) | Every int2 head call also computes the exact logits and logs, every 64 calls, the columns whose exact top-K was not all among the candidates (with `GGML_CUDA_DISABLE_GRAPHS=1`). |
+| `FRANK_STEP_AUDIT=1` | With the loop on, the device-side acceptance is always re-run for greedy host steps and compared (a mismatch is logged).  `1` also has the device write each host step's inputs for the step slab to compare, logs the counts every 64 steps, and works with the loop off. |
+| `FRANK_STEP_DEBUG=1` (`2`, `3`: more) | The loop's bound inputs, hand-backs and run counts (WARN level).  Without it, a lasting reason the loop does not run (the drafter, a sampler) is logged once at INFO; `2` logs every reason, also the ones that come and go between steps (the prompt being processed, a pending draft). |
+
+## Old names
+
+Before 2026-11 (llama-cpp-overdoing, patches 0001-0015) the switches were named `GGML_LF_*`, `GGML_CUDA_*` and `LLAMA_*`:
+the same name after the prefix became `FRANK_*` (`GGML_LF_KQ_BLAS` → `FRANK_KQ_BLAS`, `GGML_CUDA_MMVK` → `FRANK_MMVK`,
+`LLAMA_RS_ANCHOR` → `FRANK_RS_ANCHOR`, `GGML_LF_ALL` → `FRANK_ALL`).  An old name is no longer read; the server warns at
+startup when one is set.
 
 ## Related, not from this repo
 
 | variable | what it does |
 |---|---|
-| `GGML_CUDA_FA_STAGE_MAX_MB` | rdna-boosts: cap (MiB) of the flash-attention F16 staging copy, which only grows.  Where F8 runs (every GPU RDNA4) and the variable is unset, 0002 sets it to 1: the batches F8 does not take (9-31 tokens) then read the q8_0 cache directly, same result and speed, and the copy (about 1.2 GB at 240K context; on Windows it ends up in shared memory) is never made.  An explicit value still wins; `0` means no cap. |
-| `GGML_LF_DFLASH_DEV` | rdna-boosts (F1), on by default: with a DFlash draft the target model's features stay on the GPU.  `0` turns it off. |
-| `HIPBLASLT_TENSILE_LIBPATH` | hipBLASLt's own: where its kernels are.  See the build guides. |
-| `HIP_VISIBLE_DEVICES` | HIP's own: which GPUs the program sees.  K1's default needs every visible GPU to be a gfx1201 (see the Windows build guide). |
-| `HSA_USERPTR_FOR_PAGED_MEM` | ROCm's own, Linux.  We set it to `0`: ROCm then allocates pinned host memory (`hipHostMalloc`, the `ROCm_Host` buffers) through the driver instead of as pageable pages registered with the GPU, which the kernel may swap out or move, stopping every GPU queue of the process until the page is back.  See the [README](README.md#switches).  Not needed on Windows. |
+| `GGML_CUDA_FA_STAGE_MAX_MB` | rdna-boosts: cap (MiB) of the flash-attention F16 staging copy, which only grows.  Where F8 runs (every GPU RDNA4) and the variable is unset, J1 sets it to 1: the batches F8 does not take (9-31 tokens) then read the cache directly, with the same result and speed, and the copy (about 1.2 GB at 240K context; on Windows it ends up in shared memory) is never made.  An explicit value still wins; `0` means no cap. |
+| `LLAMA_DFLASH_DEV` | rdna-boosts: with a DFlash draft the target model's features stay on the GPU (on by default).  `0` forces the host path. |
+| `LLAMA_DEVICE_INPUT` | rdna-boosts: the input layer on the GPU.  Unset, it follows the GPU-resident loop (J6), which needs it. |
+| `LLAMA_STATE_ASYNC`, `LLAMA_STATE_ASYNC_MAX_MIB` | rdna-boosts: state copies through a pinned stage (on), and the size above which J7 copies in bands (256). |
+| `GGML_CUDA_GRID_STALL_PAD` | rdna-boosts: the empty blocks against the gfx1201 grid stall (on); J3 adds one on mmvk. |
+| `HIPBLASLT_TENSILE_LIBPATH` | hipBLASLt's own: where its kernels are.  Not needed when they are where hipBLASLt looks (on Windows, a `gfx1201` folder next to `llama-server.exe`): [BUILD.md](BUILD.md#pitfalls). |
+| `HIP_VISIBLE_DEVICES` | HIP's own: which GPUs the program sees.  K1's default needs every visible GPU to be a gfx1201, J3's int2 draft head and J6's loop one GPU ([README](README.md#run-and-switches)). |
+| `HSA_USERPTR_FOR_PAGED_MEM` | ROCm's own, Linux.  We set it to `0`: ROCm then allocates pinned host memory (`hipHostMalloc`, the `ROCm_Host` buffers) through the driver instead of as pageable pages registered with the GPU, which the kernel may swap out or move, stopping every GPU queue of the process until the page is back.  See the [README](README.md#run-and-switches).  Not needed on Windows. |
 
----
-
-# 開關
-
-本文件由 Claude（AI）撰寫。所有開關都是環境變數，`llama-server` 啟動時讀一次。**patch 預設都是開的**（預設值寫在每個變數下方）：要關哪一個，就把它設成 `0`。`GGML_LF_ALL=0` 會讓所有沒設的開關預設改成關；這時行為和原版 rdna-boosts 相同，只差 0005。`0007` 是例外：不設就是關（它有損）。在啟動 server 的 shell 裡設定（bash 寫在指令前面 `名稱=值`，PowerShell 用 `$env:名稱 = "值"`）。
-
-## 主要開關
-
-| 變數 | patch | 值 | 作用 |
-|---|---|---|---|
-| `GGML_LF_KQ_BLAS`<br>（預設：所有 GPU 都是 gfx1201 時為 `fp8`，否則關） | 0001 K1 | `fp8`、`f16`、`0` | 量化權重（MXFP4 除外；只有一般的矩陣乘，不含 MoE 專家）的 prefill 矩陣乘改走 hipBLASLt。`fp8`：權重與 activation 都轉 fp8，最快。`f16`：權重轉 f16，KLD 與底噪相同。權重 2000 萬元素以上的矩陣處理 384 token 以上的批次，較小的權重處理 1024 token 以上（再小時固定開銷輸給 MMQ）。預設值依賴內建的 gfx1201 演算法清單；其他顯卡請明確設定（這時會在啟動時實測挑選，結果可能每次不同）。 |
-| `GGML_LF_KQ_BLAS_FP8_KEEP`<br>（預設 `64`） | 0001 K1 | 數字；`0` 為關 | 只對 K1 `fp8`：每個輸入批次挑出 activation 最大的通道（最多 248，取 8 的倍數），把這些通道的權重與 activation 的 fp8 捨入誤差，當成第二個 fp8 項接在同一次矩陣乘裡。fp8 比 `f16` 多出的誤差約減半，prefill 約慢 1%。 |
-| `GGML_LF_DRAFT_UB`<br>（預設 `512`） | 0001 K1 | 數字；`0` 為不限 | 限制草稿模型的 ubatch（只會調小）。`-ub 2048` 時 `512` 約省 0.7 GiB 顯存。 |
-| `GGML_LF_FA_FP8`<br>（預設開） | 0002 F8 | `1`、`0` | prefill 的 flash attention 改用 fp8。只在 RDNA4、`-fa on` 且 KV 快取為 q8_0（`-ctk q8_0 -ctv q8_0`）時作用，批次 32 token 以上、KV 512 格以上。 |
-| `GGML_LF_MXFP4_DIRECT`<br>（預設 `blaslt`） | 0003 M4 | `blaslt`、`0` | 只對 MXFP4 權重：prefill 時把權重精確轉成 fp8，用 0001 的 fp8 矩陣乘。批次 64 token 以上。（`fp8`、`f16` 是較舊的 kernel，稍慢。） |
-| `LLAMA_REASONING_GUARD`<br>（預設開） | 0004 | `1`、`0` | 模型在思考區裡抽到「結束回合」時，改成輸出思考區的結束標籤（`</think>`）並繼續生成，答案就會落在正文而不是思考區。在那之前的內容完全不變；不會縮短思考，被 `max_tokens` 截斷的回覆也照舊。觸發時模型通常會在思考之後把答案再寫一次（`max_tokens` 要留餘裕），log 會印 `emitting the end tag`。需要模板的思考結束標籤以單一 token 結尾（Qwen 的 `</think>`），否則 log 會說它沒開。 |
-| `GGML_CUDA_MMVK`<br>（預設 `2`） | 0006 mmvk | `0`～`4` | Q4_K／Q5_K／Q6_K 在 1～8 個 token 時的矩陣乘（decode 與推測解碼的驗證）改用 mmvk：activation 留在暫存器裡，給多列權重重複使用。`2`：讀同一個輸入的矩陣乘（gate＋up、q＋k＋v、DeltaNet qkv＋z）合併成一次發射；`1`：各自發射（數值相同，約慢 1%）。`1`、`2` 只在 llama-server 驗證推測解碼草稿時開（草稿模型、MTP 或 ngram）：只有單 token decode 時原版 kernel 快 1～1.6%。`3`／`4` 相同但一律開。在不支援的 GPU 上不作用（只支援 RDNA4）。server log 會印 `mmvk on (...)` 或 `mmvk off (...)`。和原版 kernel 不逐位元相同（浮點加總順序不同）；decode 與驗證彼此一致。 |
-| `GGML_CUDA_MMVK_EXT`<br>（預設 `1`） | 0006 mmvk | 位元 | `1`：合併發射可混合不同權重型別。`2`：IQ4_XS／IQ4_NL／MXFP4 也走 mmvk（這些型別的原版 kernel 已接近頻寬上限，平常不設）。 |
-| `LLAMA_SPEC_LENIENCE`<br>（預設關，`1`） | 0007 | 0 到 1 之間的數字 | **有損。** 使用抽樣草稿（llama.cpp 自己的 `--spec-draft-sampling probabilistic`）且請求溫度大於 0 時，草稿字的接受機率從 min(1, p/q) 改成 min(1, p/(l·q))；驗證的其餘部分不變，所以任何字的機率最多變成原本的 1/l 倍。請求欄位 `spec_lenience` 可逐請求設定。溫度 0 或 greedy 草稿時沒有作用。`0.8663` 對速度與品質的影響見 [2026-10-27 報告](reports/2026-10-27.md)。 |
-| `GGML_GLU_INPLACE`<br>（預設開） | 0008 | `1`、`0` | 圖配置器可以讓 GLU（SwiGLU、GEGLU…）在 gate 沒有其他讀取者時直接寫進 gate 的記憶體，FFN 的 gate、up、GLU 輸出就不會同時存在：Qwen3.8-27B 在 `-ub 2048` 時計算緩衝區少 150 MiB。輸出相同。 |
-| `GGML_CUDA_FA_BAND_SPLIT`<br>（預設開） | 0009 | `1`、`0` | RDNA4：9～16 個查詢列的草稿驗證批次（unified KV 下兩個 slot 同時驗證，或 n-gram 草稿超過 7 個 token）把注意力切成兩半、每半最多 8 列，走 decode／驗證用的 kernel，而不是一般 kernel。每一列得到的結果和 8 列以下的批次相同（和一般 kernel 不逐位元相同）。只在 `-fa on`、KV 達 `GGML_CUDA_FA_BAND_SPLIT_MIN_KV` 格（預設 `8192`；`0` 為不限長度）時作用：更短時兩次發射的成本大於省下的。 |
-| `LLAMA_DFLASH_ADAPTIVE`<br>（預設開） | 0012 | `1`、`2`、`0` | DFlash2 依照持續更新的接受率估計，為每個序列各自選草稿寬度（3 到 `--spec-draft-n-max`）；輸出不變。`2` 另外記錄寬度變化，以及每個請求在各寬度的驗證次數。`0`：固定寬度。`LLAMA_DFLASH_ADAPTIVE_COST`（`0.035`）與 `LLAMA_DFLASH_ADAPTIVE_JUMP`（`0.08`）是固定成本模型的常數；執行時不計時。 |
-| `GGML_CUDA_GDN_NT`<br>（預設開） | 0013 | `1`、`0` | Gated DeltaNet 的驗證 kernel（qwen35／qwen35moe 的草稿驗證）讀遞迴狀態、寫每個 token 的快照時用 non-temporal 提示，不把接下來矩陣乘的權重擠出快取。數值相同。 |
-| `LLAMA_RS_ANCHOR`<br>（預設開） | 0013 | `1`、`0` | qwen35／qwen35moe 搭配草稿時：每個 slot 只留兩個遞迴狀態平面（上一批之後的狀態、該批開始時的狀態）和該批每個 token 的重播因子，而不是每個草稿 token 一份完整狀態；草稿只接受一部分時，從開始時的狀態重播。輸出相同；2 slot 約省 1 GiB 顯存（1 slot 約 0.5 GiB），速度略快。所有遞迴層要放在 CPU 或 CUDA／ROCm GPU 上（否則 log 會說它關了）。v3 以前（0013 v2）不設成 `1` 就是關。 |
-| `LLAMA_SPEC_NGRAM_PROMPT_ONLY`<br>（預設開） | 0014 | `1`、`0` | 只在用 `ngram-mod` 時作用。每個序列只從本次提示查 n-gram 草稿，用自己的表並核對 key；生成的內容不加進表裡。`0`：上游共用、不核對的表。 |
-| `LLAMA_STATE_ASYNC_BANDS`<br>（單一裝置時預設開） | 0005 | `1`、`0` | 超過 `LLAMA_STATE_ASYNC_MAX_MIB`（256）的狀態，分段經鎖定暫存區複製。`0`：逐張量複製。`1`：強制開，多裝置時 `-sm tensor` 可能無法處理這種切法。 |
-| `GGML_LF_KQ_BLAS_ADD`<br>（預設開） | 0001、0003 | `1`、`0` | K1 或 M4 接手的矩陣乘後面的殘差 ADD 併進 GEMM。輸出相同。 |
-| `LLAMA_SPEC_ALIGN`<br>（預設開） | 0015 | `1`、`0` | 只對 hybrid／recurrent 模型：在同一批次裡驗證草稿的序列送出同樣長度的草稿（DFlash2 的自適應寬度往上對齊其他序列，最多到 `--spec-draft-n-max`；較長的草稿截到最短的長度），驗證批次就不會被拆成多個 ubatch。r154 起 rdna-boosts 也用同一個變數控制它自己對 `draft-mtp-adaptive` 的對齊：設 `0` 兩者都關；`GGML_LF_ALL=0` 且沒設這個變數時，我們的關、原版的照舊開。 |
-| `LLAMA_SPEC_ALIGN_CUT`<br>（預設開） | 0015 v2 | `1`、`0` | 把同一輪的草稿截到最短的長度，以及它所依賴的「DFlash2 寬度往上對齊其他草稿器已出的草稿」。`0`：長度不同的草稿交給 ubatch 拆分處理，和原版相同（rdna-boosts 量到：n-gram 草稿因內容而短時，截短是損失；這裡截掉的是兩個上限造成的不等長，照抄 slot 的 15 個 token n-gram 草稿對上 DFlash2 的區塊）。 |
-
-0001～0003 不影響 decode 與草稿驗證：它們的批次都低於上面的下限。0006 與 0009 只作用在這兩者。0007 只改變抽樣草稿的接受方式；0012、0014、0015 只改變草稿的內容。
-
-## 需要配合的 server 參數
-
-| 參數 | 原因 |
-|---|---|
-| `-ub 2048 -b 2048` | K1 在大批次（2048）最快；小權重至少要 1024 token。主模型的計算暫存區每個 ubatch token 約 1.1 MiB：長上下文放不下時可以降低（例如 1536）。 |
-| `-fa on -ctk q8_0 -ctv q8_0` | F8 只在 flash attention＋q8_0 KV 快取上作用。 |
-| `--spec-type ngram-mod,draft-dflash --spec-ngram-mod-n-max 15 --spec-ngram-mod-n-min 1 --spec-ngram-mod-n-match 30` | 只有 0014 需要：n-gram 類型放在 DFlash2 前面。沒有它，0014 不會作用；範例指令沒有它。 |
-| `--spec-draft-sampling probabilistic` | 只有 0007 需要。llama.cpp 自己的參數：草稿改為抽樣，以拒絕取樣驗證（無損）。溫度 0.7～1.0 的寫程式／數學變快，低溫時可能變慢：請用自己的工作負載實測。 |
-
-範例指令（草稿模型）：見 [README](README.md#run)，不含 n-gram。`--spec-type`、`--spec-ngram-mod-n-max`／`-n-min` 都是上游 llama.cpp 的參數（預設 64／48）；rdna-boosts 會把長度夾到 15，沒設 `-n-min` 時最短也是 15。DFlash2 草稿模型只適用 Qwen3.8-27B（[z-lab/Qwen3.8-27B-DFlash2-GGUF](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF)，Q4_K_M）。Windows 打包版附 `run-server-sample.ps1`，只要填模型路徑。
-
-## 全部關掉
-
-`GGML_LF_ALL=0`：上面所有沒設的開關預設改成關。有設的開關仍以設定為準（例如 `GGML_LF_ALL=0 GGML_LF_FA_FP8=1` 只開 F8）。
-
-## 演算法選擇（平常不設）
-
-| 變數 | 值 | 作用 |
-|---|---|---|
-| `GGML_LF_KQ_BLAS_ALGOS` | 不設、`def.gfx1201v1`、`K1a2.<...>`、`tune`、`0` | K1 `f16` 怎麼選 hipBLASLt 演算法。不設：內建的 gfx1201 清單（`def.gfx1201v1`；其他顯卡等於 `tune`）。`K1a2.<...>`：沿用 log 之前印出的表。`tune`：啟動時實測（約 9 秒；選擇與輸出可能每次不同）。`0`：hipBLASLt 自己的第一名。log 會印出實際使用的表 `GGML_LF_KQ_BLAS_ALGOS=K1a2.<...>`。 |
-| `GGML_LF_MXFP4_ALGOS` | 不設、`heur`、`timed` | fp8 矩陣乘（K1 `fp8` 與 M4）。不設：內建的 gfx1201 fp8 清單。`heur`：hipBLASLt 的第一名。`timed`：在第一個完整批次實測（可能每次不同）。 |
-| `GGML_LF_KQ_BLAS_CHUNK_MB` | 數字 | 權重分段轉換，每段幾 MB。只省約 150 MB 顯存，prefill 變慢（Windows 約 9%），輸出也會改變。不建議。 |
-
-## 診斷用（平常不設）
-
-| 變數 | 作用 |
-|---|---|
-| `GGML_LF_KQ_BLAS_LOG=1`、`GGML_LF_MXFP4_LOG=1` | 印出每個矩陣形狀選到的演算法（K1）／每個權重一行（M4）。 |
-| `GGML_LF_KQ_BLAS_MIN_T`（384）、`GGML_LF_FA_FP8_MIN_T`（32）、`GGML_LF_FA_FP8_MIN_KV`（512）、`GGML_LF_MXFP4_MIN_T`（64） | 各路徑接手的最小批次（token）或 KV 長度；括號內為預設值。K1 的門檻只用在 2000 萬元素以上的權重（較小的至少 1024）；設 `1024` 等於 0001 v4 的行為。 |
-| `GGML_LF_KQ_BLAS_DIRECT`（開）、`GGML_LF_KQ_BLAS_CHECK`（關） | 0001 v6：Q4_K／Q5_K／IQ4_XS 權重轉換不經 LDS（位元組相同、較快）；設 `0` 用舊 kernel。`CHECK=1` 每次轉換新舊各跑一次並記錄不同的位元組（診斷用，慢）。 |
-| `GGML_LF_KQ_BLAS_SHARE=0`、`GGML_LF_MXFP4_SHARE=0` | 每個矩陣乘都重新轉換 activation，而不是每個輸入只轉一次：結果相同、較慢。 |
-| `GGML_LF_MXFP4_AMAX=row`、`GGML_LF_MXFP4_CONV=row` | activation 縮放值／MXFP4 轉換的另一種 kernel：結果相同。 |
-| `GGML_LF_MXFP4_CFG`、`GGML_LF_MXFP4_SPLITK` | M4 `fp8` kernel 的實驗參數。 |
-
-## 相關但不屬於本 repo
-
-| 變數 | 作用 |
-|---|---|
-| `GGML_CUDA_FA_STAGE_MAX_MB` | rdna-boosts 的變數：flash attention F16 暫存複本的上限（MiB），這個暫存區只增不減。F8 有在跑（所有 GPU 都是 RDNA4）且沒設這個變數時，0002 把它設成 1：F8 不接手的批次（9～31 token）改直接讀 q8_0 快取，結果和速度相同，也不會產生那份複本（24 萬上下文約 1.2 GB；Windows 上會落到共用記憶體）。明確設定時以設定為準；`0` 表示不設上限。 |
-| `GGML_LF_DFLASH_DEV` | rdna-boosts 的 F1，預設開：使用 DFlash 草稿時，目標模型的特徵留在 GPU 上。`0` 為關。 |
-| `HIPBLASLT_TENSILE_LIBPATH` | hipBLASLt 自己的變數：kernel 的位置，見編譯說明。 |
-| `HIP_VISIBLE_DEVICES` | HIP 自己的變數：程式看得到哪些 GPU。K1 的預設值要求看得到的 GPU 全是 gfx1201（見 Windows 編譯說明）。 |
-| `HSA_USERPTR_FOR_PAGED_MEM` | ROCm 自己的變數，Linux 用。我們設成 `0`：ROCm 的固定主機記憶體（`hipHostMalloc`、`ROCm_Host` 緩衝區）改由驅動配置，而不是登記給 GPU 的一般可分頁記憶體；後者被核心換出或搬動時，整個行程的 GPU 佇列都會停住，直到該頁回來。詳見 [README](README.md#switches)。Windows 不需要。 |

@@ -1,0 +1,2941 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index aa3dd1797..4eabb2375 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -283,6 +283,7 @@ const std::vector<ggml_type> kv_cache_types = {
+     GGML_TYPE_F16,
+     GGML_TYPE_BF16,
+     GGML_TYPE_Q8_0,
++    GGML_TYPE_Q8_0R,
+     GGML_TYPE_Q4_0,
+     GGML_TYPE_Q4_1,
+     GGML_TYPE_IQ4_NL,
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index 5822e523c..850fc2d9a 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -433,7 +433,8 @@ extern "C" {
+         GGML_TYPE_Q1_0    = 41,
+         GGML_TYPE_Q2_0    = 42,
+         GGML_TYPE_F8_E4M3 = 43,
+-        GGML_TYPE_COUNT   = 44,
++        GGML_TYPE_Q8_0R   = 44, // the q8_0 values of a 256-value row: 256 int8, then the 8 f16 scales (KV cache rows)
++        GGML_TYPE_COUNT   = 45,
+     };
+ 
+     // [TAG_GGML_PREC]
+diff --git a/ggml/src/ggml-common.h b/ggml/src/ggml-common.h
+index 1dbbe326d..cb84b3019 100644
+--- a/ggml/src/ggml-common.h
++++ b/ggml/src/ggml-common.h
+@@ -255,6 +255,17 @@ typedef struct {
+ } block_q8_0;
+ static_assert(sizeof(block_q8_0) == sizeof(ggml_half) + QK8_0, "wrong q8_0 block size/padding");
+ 
++// q8_0r: the q8_0 values (one f16 delta per 32) of 256 consecutive elements with the codes first and the 8 deltas after
++// them, so the codes of each group of 32 start 16-byte aligned and load straight into WMMA fragments (a KV cache row of
++// head dim 256: the decode attention reads it without staging)
++#define QK8_0R 256
++#define QR8_0R 1
++typedef struct {
++    int8_t    qs[QK8_0R];         // quants
++    ggml_half d[QK8_0R / QK8_0];  // the delta of each 32
++} block_q8_0r;
++static_assert(sizeof(block_q8_0r) == QK8_0R + (QK8_0R / QK8_0) * sizeof(ggml_half), "wrong q8_0r block size/padding");
++
+ #define QK8_1 32
+ typedef struct {
+     GGML_EXTENSION union {
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index c3325c49c..62538a242 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -272,6 +272,12 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
+         .vec_dot_type             = GGML_TYPE_Q8_1,
+         .nrows                    = 1,
+     },
++    [GGML_TYPE_Q8_0R] = {
++        .from_float               = quantize_row_q8_0r,
++        .vec_dot                  = ggml_vec_dot_q8_0r_q8_0r,
++        .vec_dot_type             = GGML_TYPE_Q8_0R,
++        .nrows                    = 1,
++    },
+     [GGML_TYPE_Q8_0] = {
+         .from_float               = quantize_row_q8_0,
+         .vec_dot                  = ggml_vec_dot_q8_0_q8_0,
+diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
+index 91a1fbde6..26df07ec9 100644
+--- a/ggml/src/ggml-cpu/ops.cpp
++++ b/ggml/src/ggml-cpu/ops.cpp
+@@ -687,6 +687,7 @@ void ggml_compute_forward_add(
+         case GGML_TYPE_Q5_0:
+         case GGML_TYPE_Q5_1:
+         case GGML_TYPE_Q8_0:
++        case GGML_TYPE_Q8_0R:
+         case GGML_TYPE_MXFP4:
+         case GGML_TYPE_NVFP4:
+         case GGML_TYPE_F8_E4M3:
+@@ -1144,6 +1145,7 @@ void ggml_compute_forward_add1(
+         case GGML_TYPE_Q5_0:
+         case GGML_TYPE_Q5_1:
+         case GGML_TYPE_Q8_0:
++        case GGML_TYPE_Q8_0R:
+         case GGML_TYPE_Q8_1:
+         case GGML_TYPE_MXFP4:
+         case GGML_TYPE_NVFP4:
+@@ -1276,6 +1278,7 @@ void ggml_compute_forward_acc(
+         case GGML_TYPE_Q5_0:
+         case GGML_TYPE_Q5_1:
+         case GGML_TYPE_Q8_0:
++        case GGML_TYPE_Q8_0R:
+         case GGML_TYPE_Q8_1:
+         case GGML_TYPE_MXFP4:
+         case GGML_TYPE_NVFP4:
+@@ -4821,6 +4824,7 @@ void ggml_compute_forward_out_prod(
+         case GGML_TYPE_Q5_0:
+         case GGML_TYPE_Q5_1:
+         case GGML_TYPE_Q8_0:
++        case GGML_TYPE_Q8_0R:
+         case GGML_TYPE_MXFP4:
+         case GGML_TYPE_NVFP4:
+         case GGML_TYPE_F8_E4M3:
+@@ -5146,6 +5150,7 @@ void ggml_compute_forward_set(
+         case GGML_TYPE_Q5_0:
+         case GGML_TYPE_Q5_1:
+         case GGML_TYPE_Q8_0:
++        case GGML_TYPE_Q8_0R:
+         case GGML_TYPE_Q8_1:
+         case GGML_TYPE_MXFP4:
+         case GGML_TYPE_NVFP4:
+@@ -5372,6 +5377,7 @@ void ggml_compute_forward_get_rows(
+         case GGML_TYPE_Q5_0:
+         case GGML_TYPE_Q5_1:
+         case GGML_TYPE_Q8_0:
++        case GGML_TYPE_Q8_0R:
+         case GGML_TYPE_Q8_1:
+         case GGML_TYPE_MXFP4:
+         case GGML_TYPE_NVFP4:
+@@ -6133,6 +6139,7 @@ void ggml_compute_forward_clamp(
+         case GGML_TYPE_Q5_0:
+         case GGML_TYPE_Q5_1:
+         case GGML_TYPE_Q8_0:
++        case GGML_TYPE_Q8_0R:
+         case GGML_TYPE_Q8_1:
+         case GGML_TYPE_MXFP4:
+         case GGML_TYPE_NVFP4:
+diff --git a/ggml/src/ggml-cpu/quants.c b/ggml/src/ggml-cpu/quants.c
+index 44ea9fae5..1263835e4 100644
+--- a/ggml/src/ggml-cpu/quants.c
++++ b/ggml/src/ggml-cpu/quants.c
+@@ -526,6 +526,34 @@ void ggml_vec_dot_q8_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
+     *s = sumf;
+ }
+ 
++// q8_0r: no SIMD form (the KV cache type of the GPU decode attention; the CPU only covers fallbacks)
++void quantize_row_q8_0r(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
++    quantize_row_q8_0r_ref(x, y, k);
++}
++
++void ggml_vec_dot_q8_0r_q8_0r(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
++    assert(n % QK8_0R == 0);
++    assert(nrc == 1);
++    UNUSED(nrc);
++    UNUSED(bx);
++    UNUSED(by);
++    UNUSED(bs);
++
++    const block_q8_0r * GGML_RESTRICT x = vx;
++    const block_q8_0r * GGML_RESTRICT y = vy;
++    float sumf = 0;
++    for (int ib = 0; ib < n / QK8_0R; ++ib) {
++        for (int g = 0; g < QK8_0R / QK8_0; ++g) {
++            int sumi = 0;
++            for (int j = 0; j < QK8_0; j++) {
++                sumi += x[ib].qs[g*QK8_0 + j]*y[ib].qs[g*QK8_0 + j];
++            }
++            sumf += sumi*(GGML_CPU_FP16_TO_FP32(x[ib].d[g])*GGML_CPU_FP16_TO_FP32(y[ib].d[g]));
++        }
++    }
++    *s = sumf;
++}
++
+ void ggml_vec_dot_tq1_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+     assert(nrc == 1);
+     UNUSED(nrc);
+diff --git a/ggml/src/ggml-cpu/quants.h b/ggml/src/ggml-cpu/quants.h
+index f04be52f5..30d5c6f0e 100644
+--- a/ggml/src/ggml-cpu/quants.h
++++ b/ggml/src/ggml-cpu/quants.h
+@@ -19,6 +19,7 @@ void quantize_row_q4_1(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
+ void quantize_row_q5_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
+ void quantize_row_q5_1(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
+ void quantize_row_q8_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
++void quantize_row_q8_0r(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
+ void quantize_row_q8_1(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
+ 
+ void quantize_row_mxfp4(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
+@@ -47,6 +48,7 @@ void ggml_vec_dot_q4_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const voi
+ void ggml_vec_dot_q5_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_q5_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_q8_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
++void ggml_vec_dot_q8_0r_q8_0r(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ 
+ void ggml_vec_dot_mxfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_nvfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
+index 2e77ae8d2..213432d25 100644
+--- a/ggml/src/ggml-cuda/common.cuh
++++ b/ggml/src/ggml-cuda/common.cuh
+@@ -1773,9 +1773,32 @@ void   ggml_cuda_h2d_ring_cap_set(size_t bytes);
+ // The per-operand cap GGML_CUDA_FA_STAGE_MAX_MB resolves to (0 = unbounded): a staging request
+ // larger than this is not staged at all.  Shared by launch_fattn and the --fit accounting of the
+ // staging arena (ggml_backend_cuda_fattn_stage_bound).
++// With the fp8 prefill attention on (FRANK_FA_FP8, on unless set to 0 or unset with FRANK_ALL=0) and every device an
++// RDNA4 one (where it runs), the default is 1 MiB: a batch of 32 or more tokens goes to it and never stages, and the ones
++// it declines (9-31 tokens) read the q8_0 cache directly at the same speed and with the same result, instead of growing a
++// whole-prefix F16 copy that is never freed (the arena sits outside --fit, and on Windows a device allocation does not
++// fail when VRAM runs out but lands in shared memory).  An explicit setting still wins.
++static inline bool ggml_cuda_lf_fa_fp8_runs() {
++    const char * f = getenv("FRANK_FA_FP8");
++    const char * a = getenv("FRANK_ALL");
++    if (f != nullptr ? atoi(f) == 0 : (a != nullptr && a[0] == '0' && a[1] == '\0')) {
++        return false;
++    }
++    const ggml_cuda_device_info & info = ggml_cuda_info();
++    for (int d = 0; d < info.device_count; ++d) {
++        if (!GGML_CUDA_CC_IS_RDNA4(info.devices[d].cc)) {
++            return false;
++        }
++    }
++    return info.device_count > 0;
++}
++
+ static inline size_t ggml_cuda_fattn_stage_max_bytes() {
+     static const size_t stage_max_bytes = []() {
+         const char * e = getenv("GGML_CUDA_FA_STAGE_MAX_MB");
++        if (e == nullptr && ggml_cuda_lf_fa_fp8_runs()) {
++            return (size_t) 1 << 20;
++        }
+         return (size_t) (e ? atoll(e) : 512) << 20;
+     }();
+     return stage_max_bytes;
+diff --git a/ggml/src/ggml-cuda/convert.cu b/ggml/src/ggml-cuda/convert.cu
+index b80d78443..9f2d4d0c1 100644
+--- a/ggml/src/ggml-cuda/convert.cu
++++ b/ggml/src/ggml-cuda/convert.cu
+@@ -509,6 +509,8 @@ to_bf16_cuda_t ggml_get_to_bf16_cuda(ggml_type type) {
+             return dequantize_block_cont_cuda<QK5_1, QR5_1, dequantize_q5_1>;
+         case GGML_TYPE_Q8_0:
+             return dequantize_block_cont_cuda<QK8_0, QR8_0, dequantize_q8_0>;
++        case GGML_TYPE_Q8_0R:
++            return dequantize_block_cont_cuda<QK8_0R, QR8_0R, dequantize_q8_0r>;
+         case GGML_TYPE_Q2_K:
+             return dequantize_row_q2_K_cuda;
+         case GGML_TYPE_Q3_K:
+@@ -564,6 +566,8 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
+             return dequantize_block_cont_cuda<QK5_0, QR5_0, dequantize_q5_0>;
+         case GGML_TYPE_Q5_1:
+             return dequantize_block_cont_cuda<QK5_1, QR5_1, dequantize_q5_1>;
++        case GGML_TYPE_Q8_0R:
++            return dequantize_block_cont_cuda<QK8_0R, QR8_0R, dequantize_q8_0r>;
+         case GGML_TYPE_Q8_0:
+             if (fp16_available(ggml_cuda_info().devices[ggml_cuda_get_device()].cc)) {
+                 return dequantize_block_q8_0_f16_cuda;
+@@ -626,6 +630,8 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
+             return dequantize_block_cont_cuda<QK5_1, QR5_1, dequantize_q5_1>;
+         case GGML_TYPE_Q8_0:
+             return dequantize_block_cont_cuda<QK8_0, QR8_0, dequantize_q8_0>;
++        case GGML_TYPE_Q8_0R:
++            return dequantize_block_cont_cuda<QK8_0R, QR8_0R, dequantize_q8_0r>;
+         case GGML_TYPE_Q2_K:
+             return dequantize_row_q2_K_cuda;
+         case GGML_TYPE_Q3_K:
+@@ -687,6 +693,8 @@ to_fp16_nc_cuda_t ggml_get_to_fp16_nc_cuda(ggml_type type) {
+             return dequantize_block_cuda<QK5_1, QR5_1, dequantize_q5_1>;
+         case GGML_TYPE_Q8_0:
+             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
++        case GGML_TYPE_Q8_0R:
++            return dequantize_block_cuda<QK8_0R, QR8_0R, dequantize_q8_0r>;
+         case GGML_TYPE_BF16:
+             return convert_unary_cuda<nv_bfloat16>;
+         default:
+@@ -714,6 +722,8 @@ to_bf16_nc_cuda_t ggml_get_to_bf16_nc_cuda(ggml_type type) {
+             return dequantize_block_cuda<QK5_1, QR5_1, dequantize_q5_1>;
+         case GGML_TYPE_Q8_0:
+             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
++        case GGML_TYPE_Q8_0R:
++            return dequantize_block_cuda<QK8_0R, QR8_0R, dequantize_q8_0r>;
+         case GGML_TYPE_F16:
+             return convert_unary_cuda<half, nv_bfloat16>;
+         default:
+@@ -741,6 +751,8 @@ to_fp32_nc_cuda_t ggml_get_to_fp32_nc_cuda(ggml_type type) {
+             return dequantize_block_cuda<QK5_1, QR5_1, dequantize_q5_1>;
+         case GGML_TYPE_Q8_0:
+             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
++        case GGML_TYPE_Q8_0R:
++            return dequantize_block_cuda<QK8_0R, QR8_0R, dequantize_q8_0r>;
+         case GGML_TYPE_BF16:
+             return convert_unary_cuda<nv_bfloat16, float>;
+         default:
+diff --git a/ggml/src/ggml-cuda/cpy-utils.cuh b/ggml/src/ggml-cuda/cpy-utils.cuh
+index 7697c292d..1dc605ddb 100644
+--- a/ggml/src/ggml-cuda/cpy-utils.cuh
++++ b/ggml/src/ggml-cuda/cpy-utils.cuh
+@@ -153,6 +153,23 @@ static __device__ void quantize_f32_q8_0_block(const float * __restrict__ x, blo
+     }
+ }
+ 
++// q8_0r: q8_0's rule for each group of 32 of a 256-value block, the codes first and the 8 deltas after them
++static __device__ void quantize_f32_q8_0r_block(const float * __restrict__ x, block_q8_0r * __restrict__ y) {
++#pragma unroll 1
++    for (int g = 0; g < QK8_0R / QK8_0; ++g) {
++        float amax = 0.0f;
++        for (int j = 0; j < QK8_0; j++) {
++            amax = fmaxf(amax, fabsf(x[g * QK8_0 + j]));
++        }
++        const float d  = amax / ((1 << 7) - 1);
++        const float id = d ? 1.0f/d : 0.0f;
++        y->d[g] = d;
++        for (int j = 0; j < QK8_0; ++j) {
++            y->qs[g * QK8_0 + j] = roundf(x[g * QK8_0 + j]*id);
++        }
++    }
++}
++
+ static __device__ void quantize_f32_iq4_nl_block(const float * __restrict__ x, block_iq4_nl * __restrict__ y) {
+     float amax = 0.0f;
+     float vmax = 0.0f;
+@@ -207,6 +224,10 @@ static __device__ void cpy_blck_f32_q8_0(const char * cxi, char * cdsti) {
+     quantize_f32_q8_0_block((const float *)cxi, (block_q8_0 *)cdsti);
+ }
+ 
++static __device__ void cpy_blck_f32_q8_0r(const char * cxi, char * cdsti) {
++    quantize_f32_q8_0r_block((const float *)cxi, (block_q8_0r *)cdsti);
++}
++
+ static __device__ void cpy_blck_f32_iq4_nl(const char * cxi, char * cdsti) {
+     quantize_f32_iq4_nl_block((const float *)cxi, (block_iq4_nl *)cdsti);
+ }
+diff --git a/ggml/src/ggml-cuda/cpy.cu b/ggml/src/ggml-cuda/cpy.cu
+index dc0a19a50..06161201b 100644
+--- a/ggml/src/ggml-cuda/cpy.cu
++++ b/ggml/src/ggml-cuda/cpy.cu
+@@ -130,6 +130,18 @@ static __device__ void cpy_blck_q8_0_f32(const char * cxi, char * cdsti) {
+     }
+ }
+ 
++static __device__ void cpy_blck_q8_0r_f32(const char * cxi, char * cdsti) {
++    float * cdstf = (float *)(cdsti);
++
++#pragma unroll 4
++    for (int j = 0; j < QK8_0R; j += 2) {
++        float2 dq;
++        dequantize_q8_0r(cxi, 0, j, dq);
++        *(cdstf + j) = dq.x;
++        *(cdstf + j + 1) = dq.y;
++    }
++}
++
+ template<dequantize_kernel_t dequant, int qk>
+ static __device__ void cpy_blck_q_f32(const char * cxi, char * cdsti) {
+     float * cdstf = (float *)(cdsti);
+@@ -291,6 +303,29 @@ static void ggml_cpy_q8_0_f32_cuda(
+         (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13);
+ }
+ 
++static void ggml_cpy_f32_q8_0r_cuda(
++    const char * cx, char * cdst, const int64_t ne,
++    const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t nb00, const int64_t nb01, const int64_t nb02,
++    const int64_t nb03, const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13, cudaStream_t stream) {
++
++    GGML_ASSERT(ne % QK8_0R == 0);
++    const int64_t num_blocks = (ne/QK8_0R + CUDA_CPY_BLOCK_SIZE - 1) / CUDA_CPY_BLOCK_SIZE;
++    GGML_ASSERT(num_blocks <= INT_MAX);
++    cpy_f32_q<cpy_blck_f32_q8_0r, QK8_0R><<<num_blocks, CUDA_CPY_BLOCK_SIZE, 0, stream>>>
++        (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13);
++}
++
++static void ggml_cpy_q8_0r_f32_cuda(
++    const char * cx, char * cdst, const int64_t ne,
++    const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t nb00, const int64_t nb01, const int64_t nb02,
++    const int64_t nb03, const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t nb10, const int64_t nb11, const int64_t nb12, const int64_t nb13, cudaStream_t stream) {
++
++    const int64_t num_blocks = (ne/QK8_0R + CUDA_CPY_BLOCK_SIZE - 1) / CUDA_CPY_BLOCK_SIZE;
++    GGML_ASSERT(num_blocks <= INT_MAX);
++    cpy_q_f32<cpy_blck_q8_0r_f32, QK8_0R><<<num_blocks, CUDA_CPY_BLOCK_SIZE, 0, stream>>>
++        (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13);
++}
++
+ static void ggml_cpy_f32_q4_0_cuda(
+     const char * cx, char * cdst, const int64_t ne,
+     const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t nb00, const int64_t nb01, const int64_t nb02,
+@@ -574,6 +609,12 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
+     } else if (src0->type == GGML_TYPE_Q8_0 && src1->type == GGML_TYPE_F32) {
+         ggml_cpy_q8_0_f32_cuda
+                 (src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream);
++    } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_Q8_0R) {
++        ggml_cpy_f32_q8_0r_cuda
++                (src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream);
++    } else if (src0->type == GGML_TYPE_Q8_0R && src1->type == GGML_TYPE_F32) {
++        ggml_cpy_q8_0r_f32_cuda
++                (src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream);
+     } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_Q4_0) {
+         ggml_cpy_f32_q4_0_cuda
+                 (src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream);
+diff --git a/ggml/src/ggml-cuda/dequantize.cuh b/ggml/src/ggml-cuda/dequantize.cuh
+index a8cf54eb5..b58e33c1a 100644
+--- a/ggml/src/ggml-cuda/dequantize.cuh
++++ b/ggml/src/ggml-cuda/dequantize.cuh
+@@ -132,6 +132,18 @@ static __device__ __forceinline__ void dequantize_q8_0(const void * vx, const in
+     v.y *= d;
+ }
+ 
++static __device__ __forceinline__ void dequantize_q8_0r(const void * vx, const int64_t ib, const int iqs, float2 & v){
++    const block_q8_0r * x = (const block_q8_0r *) vx;
++
++    const float d = x[ib].d[iqs / QK8_0];
++
++    v.x = x[ib].qs[iqs + 0];
++    v.y = x[ib].qs[iqs + 1];
++
++    v.x *= d;
++    v.y *= d;
++}
++
+ //================================== k-quants
+ 
+ // Each call dequantizes one super-block of QK_K values into y using the
+diff --git a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common.cuh
+index 14f35fda1..c8c9454cb 100644
+--- a/ggml/src/ggml-cuda/fattn-common.cuh
++++ b/ggml/src/ggml-cuda/fattn-common.cuh
+@@ -28,6 +28,14 @@ static inline bool ggml_cuda_fattn_kq_block_skip_enabled() {
+     return enabled;
+ }
+ 
++// The packed bitmap (flash_attn_mask_to_KV_blocks) depends only on the mask and the tile shape.  The attention layers of
++// one graph read the same mask, so the first one of a graph evaluation builds it into a buffer kept per context and the
++// others reuse it (16 memset + prepass pairs per decode / verify step become one).  `key` packs the tile shape; `built` is
++// set when the caller must build the bitmap into the returned buffer; nullptr: no reuse (build into the pool as before).
++// ggml_cuda_fattn_new_graph_eval (fattn.cuh) starts a new evaluation.  FRANK_FA_KQ_BLOCKS_REUSE=0: build per layer.
++uint32_t * ggml_cuda_fattn_kq_blocks_reuse(const ggml_backend_cuda_context & ctx, const ggml_tensor * mask, const int64_t key[8],
++                                           size_t n_words, cudaStream_t stream, bool & built);
++
+ // Fully-masked KV-group skip in the decode/verify band (GGML_CUDA_FA_BAND_SKIP=0: off).  With a
+ // unified KV cache a sequence's attention covers every cell up to its last one, including the other
+ // slots' cells, which are -INF for this sequence; the band (n_q <= 8) used to read all of them on
+@@ -2158,21 +2166,29 @@ void launch_fattn(
+         const int64_t s33        = mask->nb[3] / sizeof(half);
+ 
+         const int64_t n_words_total = int64_t(n_streams)*ntiles_x*words_per_tile;
+-        kq_blocks.alloc(n_words_total);
+-        CUDA_CHECK(cudaMemsetAsync(kq_blocks.ptr, 0, n_words_total*sizeof(uint32_t), main_stream));
+-
+-        constexpr int n_threads = 256;
+-        const int64_t n_warps = int64_t(n_streams)*ntiles_x*n_groups;
+-        const int n_blocks = (int) ((n_warps*WARP_SIZE + n_threads - 1) / n_threads);
+-
+-        ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(
+-            dim3(n_blocks, 1, 1), dim3(n_threads, 1, 1), 0, main_stream);
+-        ggml_cuda_kernel_launch(flash_attn_mask_to_KV_blocks<ncols1>, launch_params,
+-            (const half *) mask->data, kq_blocks.ptr, n_kv, (int) Q->ne[1], s31, s33,
+-            ntiles_x, n_groups, n_streams, n_mask_streams);
+-        CUDA_CHECK(cudaGetLastError());
++        const int64_t reuse_key[8] = { n_kv, Q->ne[1], s31, s33, ntiles_x, n_streams, n_mask_streams, ncols1 };
++        bool built = true;
++        uint32_t * blocks = ggml_cuda_fattn_kq_blocks_reuse(ctx, mask, reuse_key, (size_t) n_words_total, main_stream, built);
++        if (blocks == nullptr) {
++            kq_blocks.alloc(n_words_total);
++            blocks = kq_blocks.ptr;
++        }
++        if (built) {
++            CUDA_CHECK(cudaMemsetAsync(blocks, 0, n_words_total*sizeof(uint32_t), main_stream));
++
++            constexpr int n_threads = 256;
++            const int64_t n_warps = int64_t(n_streams)*ntiles_x*n_groups;
++            const int n_blocks = (int) ((n_warps*WARP_SIZE + n_threads - 1) / n_threads);
++
++            ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(
++                dim3(n_blocks, 1, 1), dim3(n_threads, 1, 1), 0, main_stream);
++            ggml_cuda_kernel_launch(flash_attn_mask_to_KV_blocks<ncols1>, launch_params,
++                (const half *) mask->data, blocks, n_kv, (int) Q->ne[1], s31, s33,
++                ntiles_x, n_groups, n_streams, n_mask_streams);
++            CUDA_CHECK(cudaGetLastError());
++        }
+ 
+-        kq_blocks_arg = kq_blocks.ptr;
++        kq_blocks_arg = blocks;
+     }
+ 
+     // The fully-masked KV-group bitmap's PACKED layout is indexed per (stream, query tile) with a word
+diff --git a/ggml/src/ggml-cuda/fattn-q8r.cu b/ggml/src/ggml-cuda/fattn-q8r.cu
+new file mode 100644
+index 000000000..628ec562e
+--- /dev/null
++++ b/ggml/src/ggml-cuda/fattn-q8r.cu
+@@ -0,0 +1,601 @@
++// BigOne stage 4: decode / verify flash attention over the q8_0r KV cache (a row of 256 int8 codes, then the 8 f16 scales of
++// its 32-value groups; the same values as q8_0).  Head 256, GQA <= 6, 1..8 query tokens per launch (9..16 in two launches,
++// 17..31 in launches of 8: below F8's 32 rows, so no batch converts the whole cache to f16 into the pool).
++//
++// One workgroup per (split p, KV head) of eight warps: all of them load the next 16 tokens of K and V (one task a lane), widen
++// them to f16 and store them in LDS (K as [token][dim], V transposed as [dim][token], 16-byte chunks XOR-swizzled), double
++// buffered -- the six compute warps between the two halves of a step -- and the compute warps hold the GQA x width query rows
++// (up to 48, three 16-row tiles) with each tile split over two warps by head dim.  FRANK_FA_Q8R_SW=2: the earlier split,
++// two staging warps loading every byte; the bytes in LDS and their order are the same, so are the results.
++// S^T = K Q^T and O^T += V^T P^T on f16 WMMA (16x16x16, f32 accumulators), so a lane keeps one query row: the softmax is
++// lane-local after one exchange between the two head-dim halves (through LDS, summed in a fixed order so both warps make
++// the same decisions).  The running max is only raised when a block's max exceeds it by more than 2^8 (P <= 256 in f16).
++//
++// Purity: the KV cells are cut into 64-token batches and batch b always belongs to split b % P (P fixed: not a function of
++// the KV length or of the query width).  Every query row is computed alone (its own max, its own rescales), the partials
++// are merged in split order, and the one kernel instance serves every width, so a token's output does not depend on the
++// width of the batch it is verified in nor on cells past the ones it sees.  A 256-cell group that is masked for every
++// query row (the other slots' cells in a unified cache) is skipped: it would only add exact zeros.
++//
++// Simulation, measurements and the purity checks: tools/decode-attn (E4).  The online softmax is Milakov & Gimelshein's
++// (arXiv 1805.02867); skipping the rescale while a row's max stays within 2^8 of the one it was scaled to follows
++// FlashAttention-4 (Zadouri et al., arXiv 2603.05451, sec. 3.1.4), decided here per row.  Q folded with scale * log2(e) for
++// exp2 as in Triton's fused-attention tutorial (v2.1.0); 16-bit partials with f32 maxima and sums as in vLLM's
++// PagedAttention V2; int8 codes widened through the mantissa of f16 1024 as in Kim et al. (arXiv 2211.10017, sec. 3.4);
++// K / V widened once per workgroup into LDS for one KV pass of the whole GQA group as the rdna-boosts decode band does.
++
++#include "fattn-q8r.cuh"
++
++#include <algorithm>
++#include <cstdlib>
++#include <cstring>
++
++typedef int      q8r_i4 __attribute__((ext_vector_type(4)));
++typedef float    q8r_f8 __attribute__((ext_vector_type(8)));
++typedef _Float16 q8r_h2 __attribute__((ext_vector_type(2)));
++typedef _Float16 q8r_h4 __attribute__((ext_vector_type(4)));
++typedef _Float16 q8r_h8 __attribute__((ext_vector_type(8)));
++
++static constexpr int   Q8R_D          = 256;           // head dim of K and V
++static constexpr int   Q8R_ROWS       = 48;            // query rows of a KV head in one launch (GQA x width)
++static constexpr int   Q8R_TILES      = 3;             // 16-row tiles, each over two warps
++static constexpr int   Q8R_THREADS    = 32*(2*Q8R_TILES + 2);
++static constexpr int   Q8R_MAX_Q      = 8;             // query tokens of one launch
++static constexpr int   Q8R_MAX_OP_Q   = 31;            // query tokens of one op (F8 takes 32 and more)
++static constexpr int   Q8R_SKIP_WORDS = 64;            // masked-group bitmap words kept in LDS (2048 groups of 256 cells)
++static constexpr float Q8R_TAU        = 8.0f;          // lazy rescale threshold (log2)
++static constexpr float Q8R_LOG2E      = 1.4426950408889634f;
++
++uint32_t * ggml_cuda_fattn_kq_blocks_reuse(const ggml_backend_cuda_context & ctx, const ggml_tensor * mask, const int64_t key[8],
++                                           size_t n_words, cudaStream_t stream, bool & built);
++
++static bool q8r_on() {
++    static const bool on = [] {
++        const char * e = getenv("FRANK_FA_Q8R");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    return on;
++}
++
++static bool q8r_skip_on() {
++    static const bool on = [] {
++        const char * e = getenv("GGML_CUDA_FA_MASK_SKIP");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    return on;
++}
++
++// splits per KV head (FRANK_FA_Q8R_SPLIT for tuning); fixed, see the purity note above
++static int q8r_splits() {
++    static const int p = [] {
++        const char * e = getenv("FRANK_FA_Q8R_SPLIT");
++        const int v = e ? atoi(e) : 0;
++        return v > 0 ? v : 24;
++    }();
++    return p;
++}
++
++// FRANK_FA_Q8R_SW=2: the pure kernel's earlier staging (two warps load every byte); default: every warp stages a share
++static int q8r_sw() {
++    static const int sw = [] {
++        const char * e = getenv("FRANK_FA_Q8R_SW");
++        return e != nullptr && atoi(e) == 2 ? 2 : 0;
++    }();
++    return sw;
++}
++
++#if defined(RDNA4)
++// LDS positions: K [token t][dim], chunk c (8 dims) of row t at c ^ (t & 15); V^T [dim d][token], chunk c (8 tokens) of row
++// d at c ^ ((d >> 3) & 1): a fragment read touches distinct banks without padding
++static __device__ __forceinline__ int q8r_sk(const int t, const int dim) { return t*Q8R_D + (((dim >> 3) ^ (t & 15)) << 3) + (dim & 7); }
++static __device__ __forceinline__ int q8r_sv(const int d, const int tok) { return d*16 + (((tok >> 3) ^ ((d >> 3) & 1)) << 3) + (tok & 7); }
++
++// 16 codes (one b128) times scale s as two 8-element fragments: code + 128 placed in the mantissa of f16 1024 is exact
++static __device__ __forceinline__ void q8r_codes16(const q8r_i4 q, const _Float16 s, q8r_h8 & f0, q8r_h8 & f1) {
++    const q8r_h2 k = { (_Float16) 1152.0f, (_Float16) 1152.0f }, s2 = { s, s };
++    q8r_h2 x[8];
++#pragma unroll
++    for (int w = 0; w < 4; ++w) {
++        const uint32_t v = (uint32_t) q[w] ^ 0x80808080u;
++        x[2*w + 0] = (__builtin_bit_cast(q8r_h2, __builtin_amdgcn_perm(0x64646464u, v, 0x04010400u)) - k) * s2;
++        x[2*w + 1] = (__builtin_bit_cast(q8r_h2, __builtin_amdgcn_perm(0x64646464u, v, 0x04030402u)) - k) * s2;
++    }
++    f0 = __builtin_shufflevector(__builtin_shufflevector(x[0], x[1], 0, 1, 2, 3), __builtin_shufflevector(x[2], x[3], 0, 1, 2, 3), 0, 1, 2, 3, 4, 5, 6, 7);
++    f1 = __builtin_shufflevector(__builtin_shufflevector(x[4], x[5], 0, 1, 2, 3), __builtin_shufflevector(x[6], x[7], 0, 1, 2, 3), 0, 1, 2, 3, 4, 5, 6, 7);
++}
++
++// A staging lane's share of 16 tokens (s = 0..NS-1): K tasks s + NS i (token, 16-code segment), V tasks s + NS i (dim quad,
++// token quad) and the mask rows of the query tokens (s < 16: row s/2, 8 tokens); the raw bytes are loaded first and
++// widened into the LDS buffers later
++template <int NI>   // tasks a staging lane: 4 with the two staging warps (64 lanes), 1 with every warp staging (256 lanes)
++struct q8r_stage_t {
++    static constexpr int NS = 256/NI;   // staging lanes
++    q8r_i4   kq[NI];
++    _Float16 ks[NI];
++    uint32_t vw[NI][4];
++    _Float16 vsc[NI][4];
++    q8r_i4   mk = { 0, 0, 0, 0 };
++
++    __device__ __forceinline__ void load(const char * __restrict__ K, const char * __restrict__ V, const char * __restrict__ mask,
++            const int t0, const int g, const int s, const int n_q,
++            const int64_t nb11, const int64_t nb12, const int64_t nb21, const int64_t nb22, const int64_t nb31) {
++#pragma unroll
++        for (int i = 0; i < NI; ++i) {
++            const int task = s + NS*i, t = task/16, seg = task%16;
++            const char * kr = K + (int64_t) (t0 + t)*nb11 + (int64_t) g*nb12;
++            kq[i] = *(const q8r_i4 *) (kr + 16*seg);
++            ks[i] = *(const _Float16 *) (kr + Q8R_D + 2*(seg/2));
++        }
++#pragma unroll
++        for (int i = 0; i < NI; ++i) {
++            const int task = s + NS*i, dq = task%64, tq = task/64;
++#pragma unroll
++            for (int j = 0; j < 4; ++j) {
++                const char * vr = V + (int64_t) (t0 + 4*tq + j)*nb21 + (int64_t) g*nb22;
++                vw[i][j]  = *(const uint32_t *) (vr + 4*dq);
++                vsc[i][j] = *(const _Float16 *) (vr + Q8R_D + 2*(dq/8));
++            }
++        }
++        if (s < 2*Q8R_MAX_Q && s/2 < n_q) {
++            mk = *(const q8r_i4 *) (mask + (int64_t) (s/2)*nb31 + 2*(t0 + 8*(s%2)));
++        }
++    }
++
++    // sK [16][Q8R_D], sVT [Q8R_D][16], sM [Q8R_MAX_Q][16] of one buffer
++    __device__ __forceinline__ void write(_Float16 * sK, _Float16 * sVT, _Float16 * sM, const int s, const int n_q) const {
++#pragma unroll
++        for (int i = 0; i < NI; ++i) {
++            const int task = s + NS*i, t = task/16, seg = task%16;
++            q8r_h8 f0, f1;
++            q8r_codes16(kq[i], ks[i], f0, f1);
++            *(q8r_h8 *) &sK[q8r_sk(t, 16*seg)]     = f0;
++            *(q8r_h8 *) &sK[q8r_sk(t, 16*seg + 8)] = f1;
++        }
++        const q8r_h2 k1152 = { (_Float16) 1152.0f, (_Float16) 1152.0f };
++#pragma unroll
++        for (int i = 0; i < NI; ++i) {
++            // 4 dims x 4 tokens: transpose the bytes, then widen each dim's 4 codes with the 4 tokens' scales
++            const int task = s + NS*i, dq = task%64, tq = task/64;
++            const uint32_t * w = vw[i];
++            const uint32_t x01 = __builtin_amdgcn_perm(w[1], w[0], 0x05010400u), x01h = __builtin_amdgcn_perm(w[1], w[0], 0x07030602u);
++            const uint32_t x23 = __builtin_amdgcn_perm(w[3], w[2], 0x05010400u), x23h = __builtin_amdgcn_perm(w[3], w[2], 0x07030602u);
++            const uint32_t col[4] = { __builtin_amdgcn_perm(x23, x01, 0x05040100u), __builtin_amdgcn_perm(x23, x01, 0x07060302u),
++                                      __builtin_amdgcn_perm(x23h, x01h, 0x05040100u), __builtin_amdgcn_perm(x23h, x01h, 0x07060302u) };
++            const q8r_h2 s01 = { vsc[i][0], vsc[i][1] }, s23 = { vsc[i][2], vsc[i][3] };
++#pragma unroll
++            for (int e = 0; e < 4; ++e) {
++                const uint32_t v = col[e] ^ 0x80808080u;
++                const q8r_h2 a = (__builtin_bit_cast(q8r_h2, __builtin_amdgcn_perm(0x64646464u, v, 0x04010400u)) - k1152) * s01;
++                const q8r_h2 b = (__builtin_bit_cast(q8r_h2, __builtin_amdgcn_perm(0x64646464u, v, 0x04030402u)) - k1152) * s23;
++                *(q8r_h4 *) &sVT[q8r_sv(4*dq + e, 4*tq)] = __builtin_shufflevector(a, b, 0, 1, 2, 3);
++            }
++        }
++        if (s < 2*Q8R_MAX_Q && s/2 < n_q) {
++            *(q8r_i4 *) &sM[(s/2)*16 + 8*(s%2)] = mk;
++        }
++    }
++};
++#endif // defined(RDNA4)
++
++// grid (P, KV heads).  Q f32 (row qtok at nb01, head at nb02), K / V q8_0r (token at nb11 / nb21, head at nb12 / nb22),
++// mask f16 (row at nb31).  Writes split p's normalized partial (f16), its max and its sum per query row.
++// NSW: 0 = every warp stages, 2 = two staging warps (FRANK_FA_Q8R_SW=2); same bytes in LDS in the same order
++template <int NSW>
++__launch_bounds__(Q8R_THREADS)
++static __global__ void flash_attn_q8r(
++        const char * __restrict__ Q, const char * __restrict__ K, const char * __restrict__ V, const char * __restrict__ mask,
++        const uint32_t * __restrict__ skip, float * __restrict__ pm, float * __restrict__ pl, _Float16 * __restrict__ po,
++        const float qscale, const int n_kv, const int n_q, const int gqa, const int P,
++        const int64_t nb01, const int64_t nb02, const int64_t nb11, const int64_t nb12, const int64_t nb21, const int64_t nb22,
++        const int64_t nb31) {
++#if defined(RDNA4)
++    const int p = blockIdx.x, g = blockIdx.y, n_kvh = gridDim.y;
++    const int tid = threadIdx.x, warp = tid/32, lane = tid%32, r16 = lane%16, h = lane/16;
++    const int tile = warp/2, half = warp%2;
++    const int R = gqa*n_q;
++    const int row = 16*tile + r16;
++    const bool compute = warp < 2*Q8R_TILES;
++    const bool row_on = compute && row < R;
++    const int qtok = row_on ? row/gqa : 0;
++    const int nb = n_kv/64;
++
++    __shared__ __attribute__((aligned(16))) _Float16 sK[2][16*Q8R_D];
++    __shared__ __attribute__((aligned(16))) _Float16 sVT[2][Q8R_D*16];
++    __shared__ __attribute__((aligned(16))) _Float16 sM[2][Q8R_MAX_Q][16];
++    __shared__ __attribute__((aligned(16))) float sX[Q8R_TILES][2][32][8];
++    __shared__ uint32_t sSkip[Q8R_SKIP_WORDS];
++
++    const int n_words = skip ? (n_kv/256 + 31)/32 : 0;
++    for (int i = tid; i < Q8R_SKIP_WORDS; i += Q8R_THREADS) {
++        sSkip[i] = i < n_words ? skip[i] : 0u;
++    }
++    __syncthreads();
++    // the batches of split p in order, the masked groups left out (every warp walks the same sequence)
++    auto masked = [&](const int b) { const int grp = b >> 2; return (sSkip[grp >> 5] >> (grp & 31)) & 1u; };
++    auto next_batch = [&](int b) { do { b += P; } while (b < nb && masked(b)); return b; };
++    const int first = p < nb && masked(p) ? next_batch(p) : p;
++
++    if (NSW == 2 && !compute) {
++        const int s = tid - 32*2*Q8R_TILES;
++        q8r_stage_t<4> st;
++        auto load_raw  = [&](const int t0) { st.load(K, V, mask, t0, g, s, n_q, nb11, nb12, nb21, nb22, nb31); };
++        auto write_raw = [&](const int buf) { st.write(sK[buf], sVT[buf], &sM[buf][0][0], s, n_q); };
++        int b = first, sub = 0, n = 0;
++        if (b < nb) {
++            load_raw(64*b);
++            write_raw(0);
++        }
++        __syncthreads();
++#pragma unroll 1
++        while (b < nb) {
++            int b2 = b, sub2 = sub + 1;
++            if (sub2 == 4) {
++                sub2 = 0;
++                b2 = next_batch(b);
++            }
++            const bool more = b2 < nb;
++            if (more) {
++                load_raw(64*b2 + 16*sub2);
++            }
++            __syncthreads();
++            if (more) {
++                write_raw((n & 1) ^ 1);
++            }
++            __syncthreads();
++            b = b2; sub = sub2; ++n;
++        }
++        return;
++    }
++
++    // this warp's half of Q (dims 128*half .. 128*half + 127), times scale * log2(e), in f16
++    q8r_h8 qf[4][2];
++    {
++        const float * qp = (const float *) (Q + (int64_t) qtok*nb01 + (int64_t) (g*gqa + (row_on ? row % gqa : 0))*nb02);
++#pragma unroll
++        for (int j = 0; j < 4; ++j) {
++#pragma unroll
++            for (int u = 0; u < 2; ++u) {
++                q8r_h8 f = { 0, 0, 0, 0, 0, 0, 0, 0 };
++                if (row_on) {
++                    const int d0 = 32*(4*half + j) + 16*h + 8*u;
++                    const float4 a = *(const float4 *) (qp + d0), c = *(const float4 *) (qp + d0 + 4);
++                    f = q8r_h8{ (_Float16) (a.x*qscale), (_Float16) (a.y*qscale), (_Float16) (a.z*qscale), (_Float16) (a.w*qscale),
++                                (_Float16) (c.x*qscale), (_Float16) (c.y*qscale), (_Float16) (c.z*qscale), (_Float16) (c.w*qscale) };
++                }
++                qf[j][u] = f;
++            }
++        }
++    }
++    q8r_f8 o[8];
++#pragma unroll
++    for (int dt = 0; dt < 8; ++dt) {
++        o[dt] = q8r_f8{ 0, 0, 0, 0, 0, 0, 0, 0 };
++    }
++    float m_ref = -INFINITY, l_sum = 0.0f;
++    // NSW == 0: every lane stages one task of each step; the next step's raw bytes are loaded at the top of a step and written
++    // between its two halves, as the staging warps of NSW == 2 do
++    q8r_stage_t<1> sta;
++    if (NSW == 0 && first < nb) {
++        sta.load(K, V, mask, 64*first, g, tid, n_q, nb11, nb12, nb21, nb22, nb31);
++        sta.write(sK[0], sVT[0], &sM[0][0][0], tid, n_q);
++    }
++    __syncthreads();
++    const bool tile_on = 16*tile < R;   // a tile past the rows only keeps the barriers
++    int b = first, sub = 0, n = 0;
++#pragma unroll 1
++    while (b < nb) {
++        const int buf = n & 1;
++        int b2 = b, sub2 = sub + 1;
++        if (sub2 == 4) {
++            sub2 = 0;
++            b2 = next_batch(b);
++        }
++        const bool more = b2 < nb;
++        if (NSW == 0 && more) {
++            sta.load(K, V, mask, 64*b2 + 16*sub2, g, tid, n_q, nb11, nb12, nb21, nb22, nb31);
++        }
++        if (tile_on) {
++            const _Float16 * kb = sK[buf];
++            q8r_f8 sp = { 0, 0, 0, 0, 0, 0, 0, 0 };
++#pragma unroll
++            for (int j = 0; j < 4; ++j) {
++#pragma unroll
++                for (int u = 0; u < 2; ++u) {
++                    sp = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(*(const q8r_h8 *) &kb[q8r_sk(r16, 32*(4*half + j) + 16*h + 8*u)], qf[j][u], sp);
++                }
++            }
++            *(q8r_f8 *) sX[tile][half][lane] = sp;
++        }
++        __syncthreads();
++        if (tile_on) {
++            q8r_f8 s = *(const q8r_f8 *) sX[tile][0][lane] + *(const q8r_f8 *) sX[tile][1][lane];
++            const q8r_h8 mv = *(const q8r_h8 *) &sM[buf][qtok][8*h];
++#pragma unroll
++            for (int i = 0; i < 8; ++i) {
++                s[i] = fmaf((float) mv[i], Q8R_LOG2E, s[i]);
++            }
++            float mx = s[0];
++#pragma unroll
++            for (int i = 1; i < 8; ++i) {
++                mx = fmaxf(mx, s[i]);
++            }
++            mx = fmaxf(mx, __shfl_xor(mx, 16, 32));
++            if (mx > m_ref + Q8R_TAU) {
++                const float f = exp2f(m_ref - mx);
++#pragma unroll
++                for (int dt = 0; dt < 8; ++dt) {
++                    o[dt] *= f;
++                }
++                l_sum *= f;
++                m_ref = mx;
++            }
++            q8r_h8 pf;
++            float ps = 0.0f;
++#pragma unroll
++            for (int i = 0; i < 8; ++i) {
++                const _Float16 ph = (_Float16) (m_ref == -INFINITY ? 0.0f : exp2f(s[i] - m_ref));
++                pf[i] = ph;
++                ps += (float) ph;
++            }
++            l_sum += ps;
++            const _Float16 * vb = sVT[buf];
++#pragma unroll
++            for (int dt = 0; dt < 8; ++dt) {
++                o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(*(const q8r_h8 *) &vb[q8r_sv(16*(8*half + dt) + r16, 8*h)], pf, o[dt]);
++            }
++        }
++        if (NSW == 0 && more) {
++            sta.write(sK[buf ^ 1], sVT[buf ^ 1], &sM[buf ^ 1][0][0], tid, n_q);
++        }
++        __syncthreads();
++        b = b2; sub = sub2;
++        ++n;
++    }
++    if (!row_on) {
++        return;
++    }
++    const float l_tot = l_sum + __shfl_xor(l_sum, 16, 32);
++    const int64_t prow = ((int64_t) p*n_kvh + g)*Q8R_ROWS + row;
++    if (half == 0 && h == 0) {
++        pm[prow] = m_ref;
++        pl[prow] = l_tot;
++    }
++    const float inv = l_tot > 0.0f ? 1.0f/l_tot : 0.0f;
++#pragma unroll
++    for (int dt = 0; dt < 8; ++dt) {
++        q8r_h8 v;
++#pragma unroll
++        for (int i = 0; i < 8; ++i) {
++            v[i] = (_Float16) (o[dt][i]*inv);
++        }
++        *(q8r_h8 *) (po + prow*Q8R_D + 16*(8*half + dt) + 8*h) = v;
++    }
++#else
++    GGML_UNUSED_VARS(Q, K, V, mask, skip, pm, pl, po, qscale, n_kv, n_q, gqa, P, nb01, nb02, nb11, nb12, nb21, nb22, nb31);
++    NO_DEVICE_CODE;
++#endif // defined(RDNA4)
++}
++
++// grid (query rows, KV heads), one thread per dim: the P partials merged in split order into dst (f32, head at nb1, token at
++// nb2).  Up to Q8R_COMBINE_PMAX splits: the first P threads load the splits' m and l into LDS and every thread issues its
++// dim's P partial outputs before the first use (a loop of P load-then-use steps waited out each load, ~18 us a launch); the
++// arithmetic and its order are the loop's.  More splits (FRANK_FA_Q8R_SPLIT): the loop.
++static constexpr int Q8R_COMBINE_PMAX = 32;
++
++static __device__ __forceinline__ void flash_attn_q8r_combine_loop(const float * __restrict__ pm, const float * __restrict__ pl,
++        const _Float16 * __restrict__ po, char * __restrict__ dst, const int P, const int gqa, const int64_t nb1, const int64_t nb2,
++        const int row, const int g, const int n_kvh, const int d) {
++    float M = -INFINITY;
++    for (int p = 0; p < P; ++p) {
++        M = fmaxf(M, pm[((int64_t) p*n_kvh + g)*Q8R_ROWS + row]);
++    }
++    float den = 0.0f, acc = 0.0f;
++    for (int p = 0; p < P; ++p) {
++        const int64_t prow = ((int64_t) p*n_kvh + g)*Q8R_ROWS + row;
++        const float l = pl[prow];
++        if (l > 0.0f) {
++            const float w = l*exp2f(pm[prow] - M);
++            den += w;
++            acc += w*(float) po[prow*Q8R_D + d];
++        }
++    }
++    *(float *) (dst + (int64_t) (row/gqa)*nb2 + (int64_t) (g*gqa + row % gqa)*nb1 + 4*d) = den > 0.0f ? acc/den : 0.0f;
++}
++
++static __global__ void flash_attn_q8r_combine(const float * __restrict__ pm, const float * __restrict__ pl, const _Float16 * __restrict__ po,
++                                              char * __restrict__ dst, const int P, const int gqa, const int64_t nb1, const int64_t nb2) {
++    const int row = blockIdx.x, g = blockIdx.y, n_kvh = gridDim.y, d = threadIdx.x;
++    if (P > Q8R_COMBINE_PMAX) {
++        flash_attn_q8r_combine_loop(pm, pl, po, dst, P, gqa, nb1, nb2, row, g, n_kvh, d);
++        return;
++    }
++    __shared__ float s_m[Q8R_COMBINE_PMAX];
++    __shared__ float s_l[Q8R_COMBINE_PMAX];
++    if (d < P) {
++        const int64_t prow = ((int64_t) d*n_kvh + g)*Q8R_ROWS + row;
++        s_m[d] = pm[prow];
++        s_l[d] = pl[prow];
++    }
++    float v[Q8R_COMBINE_PMAX];
++#pragma unroll
++    for (int p = 0; p < Q8R_COMBINE_PMAX; ++p) {
++        v[p] = p < P ? (float) po[(((int64_t) p*n_kvh + g)*Q8R_ROWS + row)*Q8R_D + d] : 0.0f;
++    }
++    __syncthreads();
++    float M = -INFINITY;
++#pragma unroll
++    for (int p = 0; p < Q8R_COMBINE_PMAX; ++p) {
++        if (p < P) {
++            M = fmaxf(M, s_m[p]);
++        }
++    }
++    float den = 0.0f, acc = 0.0f;
++#pragma unroll
++    for (int p = 0; p < Q8R_COMBINE_PMAX; ++p) {
++        const float l = p < P ? s_l[p] : 0.0f;
++        if (l > 0.0f) {
++            const float w = l*exp2f(s_m[p] - M);
++            den += w;
++            acc += w*v[p];
++        }
++    }
++    *(float *) (dst + (int64_t) (row/gqa)*nb2 + (int64_t) (g*gqa + row % gqa)*nb1 + 4*d) = den > 0.0f ? acc/den : 0.0f;
++}
++
++// FRANK_FA_Q8R_COMBINE_CHECK=1 (testing only): the loop also merges the same partials into a scratch buffer, and a kernel
++// counts the floats that differ from the combine's output (device printf of the first ones and of a running count)
++static __global__ void flash_attn_q8r_combine_ref(const float * __restrict__ pm, const float * __restrict__ pl, const _Float16 * __restrict__ po,
++                                                  char * __restrict__ dst, const int P, const int gqa, const int64_t nb1, const int64_t nb2) {
++    flash_attn_q8r_combine_loop(pm, pl, po, dst, P, gqa, nb1, nb2, blockIdx.x, blockIdx.y, gridDim.y, threadIdx.x);
++}
++
++__device__ unsigned long long q8r_combine_n_checked = 0, q8r_combine_n_bad = 0;
++
++static __global__ void flash_attn_q8r_combine_cmp(const char * __restrict__ a, const char * __restrict__ b, const int nrow, const int nh,
++                                                  const int64_t nb1, const int64_t nb2) {
++    const int r = blockIdx.x, h = blockIdx.y, d = threadIdx.x;
++    const int64_t off = (int64_t) r*nb2 + (int64_t) h*nb1 + 4*d;
++    const uint32_t x = *(const uint32_t *) (a + off), y = *(const uint32_t *) (b + off);
++    const unsigned long long n = atomicAdd(&q8r_combine_n_checked, 1ull) + 1;
++    if (x != y) {
++        const unsigned long long nb = atomicAdd(&q8r_combine_n_bad, 1ull);
++        if (nb < 8) {
++            printf("q8r combine check: row %d head %d dim %d differs: %08x vs %08x\n", r, h, d, x, y);
++        }
++    }
++    if (n == 1 || (n & ((1ull << 20) - 1)) == 0) {
++        printf("q8r combine check: %llu floats checked, %llu differ\n", n, q8r_combine_n_bad);
++    }
++}
++
++static bool q8r_combine_check() {
++    static const bool on = [] {
++        const char * e = getenv("FRANK_FA_Q8R_COMBINE_CHECK");
++        return e != nullptr && atoi(e) != 0;
++    }();
++    return on;
++}
++
++// one warp per 256-cell group: the bit is set when the group is -INF for every one of the n_q mask rows
++static __global__ void flash_attn_q8r_groups(const half * __restrict__ mask, uint32_t * __restrict__ blocks, const int n_q, const int64_t s31,
++                                             const int n_groups) {
++    const int grp = (blockIdx.x*blockDim.x + threadIdx.x)/WARP_SIZE, lane = threadIdx.x % WARP_SIZE;
++    if (grp >= n_groups) {
++        return;
++    }
++    int all_inf = 1;
++    for (int j = 0; j < n_q; ++j) {
++        for (int k = 256*grp + lane; k < 256*(grp + 1); k += WARP_SIZE) {
++            all_inf = all_inf && __half2float(mask[(int64_t) j*s31 + k]) == -INFINITY;
++        }
++    }
++    all_inf = warp_reduce_all(all_inf);
++    if (lane == 0 && all_inf) {
++        atomicOr(blocks + (grp >> 5), 1u << (grp & 31));
++    }
++}
++
++bool ggml_cuda_flash_attn_ext_q8r_applies(const int cc, const ggml_tensor * dst) {
++    if (!q8r_on() || !GGML_CUDA_CC_IS_RDNA4(cc)) {
++        return false;
++    }
++    const ggml_tensor * Q    = dst->src[0];
++    const ggml_tensor * K    = dst->src[1];
++    const ggml_tensor * V    = dst->src[2];
++    const ggml_tensor * mask = dst->src[3];
++    if (K->type != GGML_TYPE_Q8_0R || V == nullptr || V->type != GGML_TYPE_Q8_0R || Q->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
++            mask == nullptr || mask->type != GGML_TYPE_F16 || dst->src[4] != nullptr || dst->src[5] != nullptr || dst->src[6] != nullptr) {
++        return false;
++    }
++    float max_bias = 0.0f, logit_softcap = 0.0f;
++    memcpy(&max_bias,      (const float *) dst->op_params + 1, sizeof(float));
++    memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(float));
++    if (max_bias != 0.0f || logit_softcap != 0.0f) {
++        return false;
++    }
++    if (Q->ne[0] != Q8R_D || K->ne[0] != Q8R_D || V->ne[0] != Q8R_D || Q->ne[1] > Q8R_MAX_OP_Q || Q->ne[3] != 1 || K->ne[3] != 1 ||
++            V->ne[3] != 1 || mask->ne[2] != 1 || mask->ne[3] != 1 || V->ne[1] != K->ne[1] || V->ne[2] != K->ne[2] ||
++            K->ne[1] % 256 != 0 || mask->ne[0] < K->ne[1] || mask->ne[1] < Q->ne[1] || Q->ne[2] % K->ne[2] != 0 ||
++            (Q->ne[2]/K->ne[2])*Q8R_MAX_Q > Q8R_ROWS || dst->nb[0] != sizeof(float)) {
++        return false;
++    }
++    for (const ggml_tensor * t : { Q, K, V, mask }) {
++        if ((uintptr_t) t->data % 16 != 0 || t->nb[1] % 16 != 0 || t->nb[2] % 16 != 0) {
++            return false;
++        }
++    }
++    return true;
++}
++
++void ggml_cuda_flash_attn_ext_q8r(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * Q    = dst->src[0];
++    const ggml_tensor * K    = dst->src[1];
++    const ggml_tensor * V    = dst->src[2];
++    const ggml_tensor * mask = dst->src[3];
++    cudaStream_t stream = ctx.stream();
++
++    const int n_q   = (int) Q->ne[1];
++    const int n_kv  = (int) K->ne[1];
++    const int n_kvh = (int) K->ne[2];
++    const int gqa   = (int) (Q->ne[2]/K->ne[2]);
++    const int P     = q8r_splits();
++    float scale = 1.0f;
++    memcpy(&scale, dst->op_params, sizeof(float));
++
++    // the groups masked for every query row of the op (shared by its attention layers; one bitmap for both launches of
++    // 9..16 tokens)
++    const uint32_t * skip = nullptr;
++    ggml_cuda_pool_alloc<uint32_t> skip_buf(ctx.pool());
++    const int n_groups = n_kv/256;
++    if (q8r_skip_on() && n_groups <= 32*Q8R_SKIP_WORDS) {
++        const int     n_words = (n_groups + 31)/32;
++        const int64_t s31     = mask->nb[1]/sizeof(half);
++        const int64_t key[8]  = { n_kv, n_q, s31, 0, 0, 0, 0, -256 };
++        bool built = true;
++        uint32_t * blocks = ggml_cuda_fattn_kq_blocks_reuse(ctx, mask, key, (size_t) n_words, stream, built);
++        if (blocks == nullptr) {
++            blocks = skip_buf.alloc(n_words);
++        }
++        if (built) {
++            CUDA_CHECK(cudaMemsetAsync(blocks, 0, n_words*sizeof(uint32_t), stream));
++            flash_attn_q8r_groups<<<(n_groups*WARP_SIZE + 255)/256, 256, 0, stream>>>((const half *) mask->data, blocks, n_q, s31, n_groups);
++            CUDA_CHECK(cudaGetLastError());
++        }
++        skip = blocks;
++    }
++
++    ggml_cuda_pool_alloc<float> pm(ctx.pool(), (size_t) P*n_kvh*Q8R_ROWS);
++    ggml_cuda_pool_alloc<float> pl(ctx.pool(), (size_t) P*n_kvh*Q8R_ROWS);
++    ggml_cuda_pool_alloc<half>  po(ctx.pool(), (size_t) P*n_kvh*Q8R_ROWS*Q8R_D);
++    // up to 8 rows: one launch; 9..16: two halves (two slots verifying the same width are the two sequences); 17..31:
++    // launches of 8.  Every row is computed alone, so the cut does not change a row's result.
++    const int n_first = n_q <= Q8R_MAX_Q ? n_q : n_q <= 2*Q8R_MAX_Q ? (n_q + 1)/2 : Q8R_MAX_Q;
++    for (int q0 = 0; q0 < n_q; q0 += n_first) {
++        const int nq = std::min(n_first, n_q - q0);
++        const char * Qd = (const char *) Q->data + q0*Q->nb[1];
++        const char * Md = (const char *) mask->data + q0*mask->nb[1];
++        if (q8r_sw() == 2) {
++            flash_attn_q8r<2><<<dim3(P, n_kvh), Q8R_THREADS, 0, stream>>>(
++                Qd, (const char *) K->data, (const char *) V->data, Md, skip, pm.get(), pl.get(), (_Float16 *) po.get(), scale*Q8R_LOG2E,
++                n_kv, nq, gqa, P, Q->nb[1], Q->nb[2], K->nb[1], K->nb[2], V->nb[1], V->nb[2], mask->nb[1]);
++        } else {
++            flash_attn_q8r<0><<<dim3(P, n_kvh), Q8R_THREADS, 0, stream>>>(
++                Qd, (const char *) K->data, (const char *) V->data, Md, skip, pm.get(), pl.get(), (_Float16 *) po.get(), scale*Q8R_LOG2E,
++                n_kv, nq, gqa, P, Q->nb[1], Q->nb[2], K->nb[1], K->nb[2], V->nb[1], V->nb[2], mask->nb[1]);
++        }
++        CUDA_CHECK(cudaGetLastError());
++        flash_attn_q8r_combine<<<dim3(gqa*nq, n_kvh), Q8R_D, 0, stream>>>(
++            pm.get(), pl.get(), (const _Float16 *) po.get(), (char *) dst->data + q0*dst->nb[2], P, gqa, dst->nb[1], dst->nb[2]);
++        CUDA_CHECK(cudaGetLastError());
++        if (q8r_combine_check()) {
++            // the loop's merge into a scratch copy of the output rows (same strides), then the comparison
++            const int64_t nh = (int64_t) n_kvh*gqa;
++            ggml_cuda_pool_alloc<char> ref(ctx.pool(), (size_t) ((nq - 1)*dst->nb[2] + (nh - 1)*dst->nb[1] + 4*Q8R_D));
++            flash_attn_q8r_combine_ref<<<dim3(gqa*nq, n_kvh), Q8R_D, 0, stream>>>(
++                pm.get(), pl.get(), (const _Float16 *) po.get(), ref.get(), P, gqa, dst->nb[1], dst->nb[2]);
++            flash_attn_q8r_combine_cmp<<<dim3(nq, (unsigned) nh), Q8R_D, 0, stream>>>(
++                (const char *) dst->data + q0*dst->nb[2], ref.get(), nq, (int) nh, dst->nb[1], dst->nb[2]);
++            CUDA_CHECK(cudaGetLastError());
++        }
++    }
++}
+diff --git a/ggml/src/ggml-cuda/fattn-q8r.cuh b/ggml/src/ggml-cuda/fattn-q8r.cuh
+new file mode 100644
+index 000000000..541c525a4
+--- /dev/null
++++ b/ggml/src/ggml-cuda/fattn-q8r.cuh
+@@ -0,0 +1,8 @@
++#pragma once
++
++#include "common.cuh"
++
++// BigOne stage 4: decode / verify flash attention over the q8_0r KV cache (fattn-q8r.cu).  Head 256, GQA <= 6, 1..31 query
++// tokens, a mask, no ALiBi / softcap / sinks, on RDNA4.  FRANK_FA_Q8R=0: off (the op then runs on f16 copies of K and V).
++bool ggml_cuda_flash_attn_ext_q8r_applies(int cc, const ggml_tensor * dst);
++void ggml_cuda_flash_attn_ext_q8r(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index 50e9570df..5380fee0d 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -4,6 +4,8 @@
+ #include "fattn-tile.cuh"
+ #include "fattn-vec.cuh"
+ #include "fattn.cuh"
++#include "fattn-q8r.cuh"
++#include "lf-fa-fp8.cuh"
+ 
+ #if !defined(GGML_USE_MUSA)
+ 
+@@ -621,7 +623,41 @@ static bool ggml_cuda_fattn_kv_type_supported(const ggml_type type) {
+     }
+ }
+ 
++// q8_0r K / V (BigOne's KV cache type): until a kernel of its own takes the op, the flash attention sees a copy of the
++// op with f16 K and V (converted into a pool buffer each at launch; contiguous strides)
++static bool ggml_cuda_fattn_q8r(const ggml_tensor * dst) {
++    return dst->src[1]->type == GGML_TYPE_Q8_0R || (dst->src[2] && dst->src[2]->type == GGML_TYPE_Q8_0R);
++}
++
++static void ggml_cuda_fattn_as_f16(const ggml_tensor * t, ggml_tensor & t16, void * data) {
++    t16 = *t;
++    t16.type = GGML_TYPE_F16;
++    t16.data = data;
++    t16.view_src = nullptr;
++    t16.view_offs = 0;
++    t16.nb[0] = sizeof(half);
++    for (int i = 1; i < GGML_MAX_DIMS; ++i) {
++        t16.nb[i] = t16.nb[i - 1] * t16.ne[i - 1];
++    }
++}
++
++static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const ggml_tensor * dst);
++
++static best_fattn_kernel ggml_cuda_get_best_fattn_kernel_q8r(const int device, const ggml_tensor * dst) {
++    ggml_tensor k16, v16, d16 = *dst;
++    ggml_cuda_fattn_as_f16(dst->src[1], k16, nullptr);
++    d16.src[1] = &k16;
++    if (dst->src[2]) {
++        ggml_cuda_fattn_as_f16(dst->src[2], v16, nullptr);
++        d16.src[2] = &v16;
++    }
++    return ggml_cuda_get_best_fattn_kernel(device, &d16);
++}
++
+ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const ggml_tensor * dst) {
++    if (ggml_cuda_fattn_q8r(dst)) {
++        return ggml_cuda_get_best_fattn_kernel_q8r(device, dst);
++    }
+ #ifndef FLASH_ATTN_AVAILABLE
+     GGML_UNUSED(device); GGML_UNUSED(dst);
+     return BEST_FATTN_KERNEL_NONE;
+@@ -884,7 +920,9 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+     GGML_ASSERT(K != nullptr);
+     GGML_ASSERT(V != nullptr);
+ 
+-    const best_fattn_kernel kernel = ggml_cuda_get_best_fattn_kernel(device, dst);
++    // q8_0r: its decode / verify kernel (fattn-q8r.cu) and F8 read the cache rows themselves and the f16 fallback converts
++    // into pool buffers, so the node keeps no staging copy (otherwise f16 K and V of the whole cache, ~1 GiB at 245760 cells)
++    const best_fattn_kernel kernel = ggml_cuda_fattn_q8r(dst) ? BEST_FATTN_KERNEL_NONE : ggml_cuda_get_best_fattn_kernel(device, dst);
+ 
+     bool need_f16_K = false;
+     bool need_f16_V = false;
+@@ -933,9 +971,148 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+ }
+ 
+ thread_local ggml_cuda_fa_had_req ggml_cuda_fa_had;
++// RDNA4 verify batches of 9..16 query rows (an n-gram draft longer than 7, or two slots of a unified KV cache verifying
++// the same width in one ubatch) fall off the decode/verify band onto the generic WMMA config, which for GQA 6 re-reads
++// every K/V element three times: at 110K cells such a batch spends about five times the band's attention time.  The
++// rows of an attention op are independent, so the batch is run as two halves of at most 8 rows, each through the band:
++// every row then gets the band's result, the same as in a batch of <= 8 rows.  The ubatch of two slots that verify the
++// same width holds one sequence after the other, so the halves are the two sequences and each half also skips the
++// other slot's cells (GGML_CUDA_FA_BAND_SKIP).  FRANK_FA_BAND_SPLIT=0 turns it off (unset with FRANK_ALL=0: off).  Below
++// FRANK_FA_BAND_SPLIT_MIN_KV cells (default 8192) the two band launches cost more than the one generic launch saves
++// (gfx1201, Qwen3.8-27B, 12..16 rows: +0.4..2.5 % per step at 1K..4K cells, -2 % at 8K, -30 % at 110K).
++static bool ggml_cuda_fattn_band_split_enabled() {
++    static const bool enabled = []() {
++        const char * e = getenv("FRANK_FA_BAND_SPLIT");
++        if (e != nullptr) {
++            return atoi(e) != 0;
++        }
++        const char * a = getenv("FRANK_ALL");
++        return !(a != nullptr && a[0] == '0' && a[1] == '\0');
++    }();
++    return enabled;
++}
++
++static int64_t ggml_cuda_fattn_band_split_min_kv() {
++    static const int64_t v = []() {
++        const char * e = getenv("FRANK_FA_BAND_SPLIT_MIN_KV");
++        return e != nullptr ? (int64_t) atoll(e) : (int64_t) 8192;
++    }();
++    return v;
++}
++
++static bool ggml_cuda_flash_attn_ext_band_split(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * Q = dst->src[0];
++    const int64_t n_q = Q->ne[1];
++    if (n_q <= 8 || n_q > 16 || Q->ne[3] != 1 || dst->ne[3] != 1 || !ggml_cuda_fattn_band_split_enabled() ||
++            dst->src[1]->ne[1] < ggml_cuda_fattn_band_split_min_kv()) {
++        return false;
++    }
++    const int cc = ggml_cuda_info().devices[ctx.device].cc;
++    if (!GGML_CUDA_CC_IS_RDNA4(cc)) {
++        return false;
++    }
++    // a half's dst is a row range of this node's allocation: there must be no scratch behind it
++    if (ggml_cuda_flash_attn_ext_get_alloc_size(ctx.device, dst) != ggml_nbytes(dst)) {
++        return false;
++    }
++
++    const ggml_tensor * mask   = dst->src[3];
++    // the derived form: src[6] the cell positions, src[7] / src[8] the per-token window (src[5] is the kv_rows form)
++    const ggml_tensor * tok_lo = dst->src[7];
++    const ggml_tensor * tok_hi = dst->src[8];
++
++    // shallow copies with the row range of each half: Q and the mask rows (dim 1), dst rows (dim 2), the derived
++    // mask's per-token window (dim 0); K, V, sinks and the cell positions are shared
++    ggml_tensor q_h[2], mask_h[2], lo_h[2], hi_h[2], dst_h[2];
++    const int64_t n_0 = (n_q + 1)/2;
++    for (int h = 0; h < 2; ++h) {
++        const int64_t r0 = h == 0 ? 0 : n_0;
++        const int64_t nr = h == 0 ? n_0 : n_q - n_0;
++
++        q_h[h] = *Q;
++        q_h[h].ne[1] = nr;
++        q_h[h].data  = (char *) Q->data + r0*Q->nb[1];
++
++        dst_h[h] = *dst;
++        dst_h[h].ne[2]  = nr;
++        dst_h[h].data   = (char *) dst->data + r0*dst->nb[2];
++        dst_h[h].src[0] = &q_h[h];
++        if (mask) {
++            GGML_ASSERT(mask->ne[1] >= n_q);
++            mask_h[h] = *mask;
++            mask_h[h].ne[1] = nr;
++            mask_h[h].data  = (char *) mask->data + r0*mask->nb[1];
++            dst_h[h].src[3] = &mask_h[h];
++        }
++        if (tok_lo && tok_hi) {
++            GGML_ASSERT(tok_lo->ne[0] == n_q && tok_hi->ne[0] == n_q && tok_lo->ne[1] == 1 && tok_hi->ne[1] == 1);
++            lo_h[h] = *tok_lo;
++            lo_h[h].ne[0] = nr;
++            lo_h[h].data  = (char *) tok_lo->data + r0*tok_lo->nb[0];
++            hi_h[h] = *tok_hi;
++            hi_h[h].ne[0] = nr;
++            hi_h[h].data  = (char *) tok_hi->data + r0*tok_hi->nb[0];
++            dst_h[h].src[7] = &lo_h[h];
++            dst_h[h].src[8] = &hi_h[h];
++        }
++
++        if (ggml_cuda_get_best_fattn_kernel(ctx.device, &dst_h[h]) != BEST_FATTN_KERNEL_MMA_F16 ||
++                !ggml_cuda_fattn_band_wmma_applies(cc, &dst_h[h])) {
++            return false;
++        }
++    }
++
++    for (int h = 0; h < 2; ++h) {
++        ggml_cuda_flash_attn_ext(ctx, &dst_h[h]);
++    }
++    return true;
++}
+ 
+ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     ggml_cuda_set_device(ctx.device);
++    // the kv_rows form (ggml_flash_attn_ext_rows, src[5]: the cell list of each slice) goes to the release's kernels: ours
++    // (the q8_0r decode / verify kernel, F8, the 9..16-row halves) read the K / V columns as cells
++    const bool kv_rows = dst->src[5] != nullptr;
++    if (ggml_cuda_fattn_q8r(dst)) {
++        // q8_0r: decode / verify on its own kernel (fattn-q8r.cu); otherwise convert K and V to f16 and run the op on the
++        // converted copies (ggml_cuda_fattn_as_f16)
++        if (!kv_rows && ggml_cuda_flash_attn_ext_q8r_applies(ggml_cuda_info().devices[ctx.device].cc, dst)) {
++            ggml_cuda_flash_attn_ext_q8r(ctx, dst);
++            return;
++        }
++        // prefill: F8 reads q8_0r as it reads q8_0
++        if (!kv_rows && ggml_cuda_lf_fa_fp8_supported(ctx, dst)) {
++            ggml_cuda_lf_fa_fp8(ctx, dst);
++            return;
++        }
++        cudaStream_t stream = ctx.stream();
++        ggml_tensor k16, v16, d16 = *dst;
++        auto conv = [&](const ggml_tensor * t, ggml_tensor & t16, ggml_cuda_pool_alloc<half> & buf) {
++            buf.alloc(ggml_nelements(t));
++            const size_t ts = ggml_type_size(t->type);
++            GGML_ASSERT(t->nb[0] == ts);
++            ggml_get_to_fp16_nc_cuda(t->type)(t->data, buf.get(), t->ne[0], t->ne[1], t->ne[2], t->ne[3],
++                                              t->nb[1] / ts, t->nb[2] / ts, t->nb[3] / ts, stream);
++            ggml_cuda_fattn_as_f16(t, t16, buf.get());
++        };
++        ggml_cuda_pool_alloc<half> kbuf(ctx.pool()), vbuf(ctx.pool());
++        conv(dst->src[1], k16, kbuf);
++        d16.src[1] = &k16;
++        if (dst->src[2]) {
++            conv(dst->src[2], v16, vbuf);
++            d16.src[2] = &v16;
++        }
++        ggml_cuda_flash_attn_ext(ctx, &d16);
++        return;
++    }
++    if (!kv_rows && ggml_cuda_flash_attn_ext_band_split(ctx, dst)) {
++        return;
++    }
++    // FP8 prefill attention (FRANK_FA_FP8; see lf-fa-fp8.cuh)
++    if (!kv_rows && ggml_cuda_lf_fa_fp8_supported(ctx, dst)) {
++        ggml_cuda_lf_fa_fp8(ctx, dst);
++        return;
++    }
+     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+         case BEST_FATTN_KERNEL_NONE:
+             GGML_ABORT("fatal error");
+@@ -965,3 +1142,81 @@ bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
+     }
+     return true;
+ }
++
++// the packed KV-group bitmap shared by the attention layers of one graph evaluation (see fattn-common.cuh)
++namespace {
++struct fattn_kq_blocks_entry {
++    uint64_t            eval    = 0;      // evaluation the bitmap was built in (0: none)
++    const ggml_tensor * mask    = nullptr;
++    const void *        data    = nullptr;
++    int64_t             key[8]  = {};
++    cudaStream_t        stream  = nullptr;
++    uint32_t *          buf     = nullptr;
++    size_t              cap     = 0;      // in words
++};
++std::mutex                                                             fattn_kq_blocks_mutex;
++std::unordered_map<const ggml_backend_cuda_context *, uint64_t>              fattn_eval;
++std::unordered_map<const ggml_backend_cuda_context *, fattn_kq_blocks_entry> fattn_kq_blocks;
++
++bool fattn_kq_blocks_reuse_on() {
++    static const bool on = [] {
++        const char * e = getenv("FRANK_FA_KQ_BLOCKS_REUSE");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    return on;
++}
++} // namespace
++
++void ggml_cuda_fattn_new_graph_eval(const ggml_backend_cuda_context & ctx) {
++    if (!fattn_kq_blocks_reuse_on()) {
++        return;
++    }
++    std::lock_guard<std::mutex> lock(fattn_kq_blocks_mutex);
++    ++fattn_eval[&ctx];
++}
++
++uint32_t * ggml_cuda_fattn_kq_blocks_reuse(const ggml_backend_cuda_context & ctx, const ggml_tensor * mask, const int64_t key[8],
++                                           const size_t n_words, cudaStream_t stream, bool & built) {
++    built = true;
++    if (!fattn_kq_blocks_reuse_on()) {
++        return nullptr;
++    }
++    std::lock_guard<std::mutex> lock(fattn_kq_blocks_mutex);
++    const uint64_t eval = fattn_eval[&ctx];
++    if (eval == 0) {
++        return nullptr;
++    }
++    fattn_kq_blocks_entry & e = fattn_kq_blocks[&ctx];
++    if (e.eval == eval && e.mask == mask && e.data == mask->data && e.stream == stream && memcmp(e.key, key, sizeof(e.key)) == 0) {
++        built = false;
++        return e.buf;
++    }
++    // another stream of this evaluation may still read the buffer: no reuse there
++    if (e.eval == eval && e.stream != stream) {
++        return nullptr;
++    }
++    if (e.buf == nullptr) {
++        // one fixed buffer (captured graphs keep its address), never while a graph is captured
++#if defined(GGML_USE_HIP)
++        hipStreamCaptureStatus cs = hipStreamCaptureStatusNone;
++        CUDA_CHECK(hipStreamIsCapturing(stream, &cs));
++        if (cs != hipStreamCaptureStatusNone) {
++            return nullptr;
++        }
++#elif defined(USE_CUDA_GRAPH)
++        cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
++        CUDA_CHECK(cudaStreamIsCapturing(stream, &cs));
++        if (cs != cudaStreamCaptureStatusNone) {
++            return nullptr;
++        }
++#endif
++        e.cap = 16384;   // 64 KiB: a 2048-token batch at a 256K context needs ~8K words
++        CUDA_CHECK(cudaMalloc((void **) &e.buf, e.cap * sizeof(uint32_t)));
++    }
++    if (n_words > e.cap) {
++        return nullptr;
++    }
++    e.eval = eval; e.mask = mask; e.data = mask->data; e.stream = stream;
++    memcpy(e.key, key, sizeof(e.key));
++    return e.buf;
++}
+diff --git a/ggml/src/ggml-cuda/fattn.cuh b/ggml/src/ggml-cuda/fattn.cuh
+index 70581659c..a074b6182 100644
+--- a/ggml/src/ggml-cuda/fattn.cuh
++++ b/ggml/src/ggml-cuda/fattn.cuh
+@@ -17,3 +17,6 @@ extern thread_local ggml_cuda_fa_had_req ggml_cuda_fa_had;
+ bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst);
+ 
+ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * dst);
++
++// a new graph evaluation: the attention layers' shared KV-group bitmap is rebuilt (fattn-common.cuh)
++void ggml_cuda_fattn_new_graph_eval(const ggml_backend_cuda_context & ctx);
+diff --git a/ggml/src/ggml-cuda/getrows.cu b/ggml/src/ggml-cuda/getrows.cu
+index 96c22ebb0..f45970d9f 100644
+--- a/ggml/src/ggml-cuda/getrows.cu
++++ b/ggml/src/ggml-cuda/getrows.cu
+@@ -365,6 +365,10 @@ static void ggml_cuda_get_rows_switch_src0_type(
+             get_rows_cuda_q<QK8_0, QR8_0, dequantize_q8_0>(src0_d, src1_d, dst_d,
+                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+             break;
++        case GGML_TYPE_Q8_0R:
++            get_rows_cuda_q<QK8_0R, QR8_0R, dequantize_q8_0r>(src0_d, src1_d, dst_d,
++                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
++            break;
+         case GGML_TYPE_Q2_K:
+             get_rows_cuda_kq<64, dst_t, dequantize_q2_K<dst_t>>(src0_d, src1_d, dst_d,
+                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+diff --git a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
+index b2692fa18..38c0f2c7b 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
+@@ -1038,7 +1038,7 @@ static int ggml_cuda_rope_fwht_count(const ggml_cgraph * cgraph, const int i, co
+         const ggml_tensor * idx = sr->src[1];
+         return view->op == GGML_OP_VIEW && view->type == GGML_TYPE_F32 && ggml_is_contiguous(view) &&
+                view->ne[0] == row_len && view->ne[1] == n_tok && view->ne[2] == 1 && view->ne[3] == 1 &&
+-               sr->op == GGML_OP_SET_ROWS && sr->src[0] == view && ggml_cuda_kv_fold_type_ok(sr->type, warp_size) &&
++               sr->op == GGML_OP_SET_ROWS && sr->src[0] == view && (ggml_cuda_kv_fold_type_ok(sr->type, warp_size) || (sr->type == GGML_TYPE_Q8_0R && row_len % QK8_0R == 0)) &&
+                sr->ne[0] == row_len && sr->ne[2] == 1 && sr->ne[3] == 1 &&
+                idx->type == GGML_TYPE_I64 && ggml_is_contiguous(idx) && idx->ne[0] == n_tok && ggml_nelements(idx) == n_tok;
+     };
+@@ -1216,7 +1216,7 @@ static int ggml_cuda_rms_norm_mul_rope_fwht_set_rows_count(const ggml_cgraph * c
+         const ggml_tensor * idx = sr->src[1];
+         return view->op == GGML_OP_VIEW && view->type == GGML_TYPE_F32 && ggml_is_contiguous(view) &&
+                view->ne[0] == row_len && view->ne[1] == n_tok && view->ne[2] == 1 && view->ne[3] == 1 &&
+-               sr->op == GGML_OP_SET_ROWS && sr->src[0] == view && ggml_cuda_kv_fold_type_ok(sr->type, warp_size) &&
++               sr->op == GGML_OP_SET_ROWS && sr->src[0] == view && (ggml_cuda_kv_fold_type_ok(sr->type, warp_size) || (sr->type == GGML_TYPE_Q8_0R && row_len % QK8_0R == 0)) &&
+                sr->ne[0] == row_len && sr->ne[2] == 1 && sr->ne[3] == 1 &&
+                idx->type == GGML_TYPE_I64 && ggml_is_contiguous(idx) && idx->ne[0] == n_tok && ggml_nelements(idx) == n_tok;
+     };
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index c626f886a..ee1fa9c8b 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -10111,6 +10111,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+                     case GGML_TYPE_Q5_0:
+                     case GGML_TYPE_Q5_1:
+                     case GGML_TYPE_Q8_0:
++                    case GGML_TYPE_Q8_0R:
+                     case GGML_TYPE_Q2_K:
+                     case GGML_TYPE_Q3_K:
+                     case GGML_TYPE_Q4_K:
+@@ -10145,7 +10146,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+                            (
+                                (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
+                                op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
+-                               op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL) &&
++                               op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL ||
++                               op->type == GGML_TYPE_Q8_0R) &&
+                                op->src[0]->type == GGML_TYPE_F32
+                            ) || (
+                                op->type == GGML_TYPE_F16 && op->src[0]->type == GGML_TYPE_F16
+@@ -10175,6 +10177,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+                 if (src0_type == GGML_TYPE_Q8_0 && src1_type == GGML_TYPE_F32) {
+                     return true;
+                 }
++                if ((src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_Q8_0R) || (src0_type == GGML_TYPE_Q8_0R && src1_type == GGML_TYPE_F32)) {
++                    return true;
++                }
+                 if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_Q4_0) {
+                     return true;
+                 }
+diff --git a/ggml/src/ggml-cuda/lf-fa-fp8.cu b/ggml/src/ggml-cuda/lf-fa-fp8.cu
+new file mode 100644
+index 000000000..cb9885819
+--- /dev/null
++++ b/ggml/src/ggml-cuda/lf-fa-fp8.cu
+@@ -0,0 +1,982 @@
++#include "lf-fa-fp8.cuh"
++
++#include <algorithm>
++#include <cstring>
++#include <map>
++#include <mutex>
++#include <type_traits>
++
++// Layout notes (gfx12 WMMA 16x16x16 fp8, wave32): operand lane l holds row l%16, k = (l/16)*8 .. +7; result element
++// (v, lane) is row v + 8*(lane/16) of the first operand, column lane%16 of the second.  With S^T = K Q^T each lane
++// holds, for its query (lane%16), 8 consecutive keys -- exactly the B-operand layout of P^T in O^T += V^T P^T.
++
++namespace {
++
++// head size D (K and V, 64 / 128 / 256) is a template parameter of every kernel
++constexpr int LF_QB  = 16;            // query tokens per block
++constexpr int LF_KT  = 64;            // keys per tile
++constexpr int LF_VS  = LF_KT + 16;    // LDS bytes per dim row of V^T (16-byte aligned rows: operand pairs load as b128)
++constexpr int LF_MAXSPLIT = 8;
++
++// FRANK_FA_FP8: on unless set to 0 (unset with FRANK_ALL=0: off)
++int lf_on() {
++    static const int v = [] {
++        const char * f = getenv("FRANK_FA_FP8");
++        if (f != nullptr) return atoi(f);
++        const char * a = getenv("FRANK_ALL");
++        return a != nullptr && a[0] == '0' && a[1] == '\0' ? 0 : 1;
++    }();
++    return v;
++}
++int lf_min_kv() { static const int v = getenv("FRANK_FA_FP8_MIN_KV") ? atoi(getenv("FRANK_FA_FP8_MIN_KV")) : 512; return v; }
++int lf_min_t() { static const int v = getenv("FRANK_FA_FP8_MIN_T") ? atoi(getenv("FRANK_FA_FP8_MIN_T")) : 32; return v; }
++
++typedef int   lf_v2i __attribute__((ext_vector_type(2)));
++typedef int   lf_v4i __attribute__((ext_vector_type(4)));
++
++// software pipeline for a run of NLOAD LDS operand loads each feeding 2 WMMAs: keep one load ahead
++template <int NLOAD>
++static __device__ __forceinline__ void lf_pipe_ds_wmma() {
++    __builtin_amdgcn_sched_group_barrier(0x100, 2, 0);
++#pragma unroll
++    for (int i = 0; i < NLOAD - 2; ++i) {
++        __builtin_amdgcn_sched_group_barrier(0x008, 2, 0);
++        __builtin_amdgcn_sched_group_barrier(0x100, 1, 0);
++    }
++    __builtin_amdgcn_sched_group_barrier(0x008, 4, 0);
++}
++
++// software pipeline for NGRP groups of NL LDS operand loads, each group feeding 2*NL WMMAs into NL different
++// accumulators: the next group's loads go between the first and the second half of the current group's WMMAs
++// (sched_group_barrier masks: 0x100 = DS read, 0x008 = MFMA/WMMA)
++template <int NGRP, int NL>
++static __device__ __forceinline__ void lf_pipe_ds_wmma_grp() {
++    __builtin_amdgcn_sched_group_barrier(0x100, NL, 0);
++#pragma unroll
++    for (int i = 0; i < NGRP - 1; ++i) {
++        __builtin_amdgcn_sched_group_barrier(0x008, NL, 0);
++        __builtin_amdgcn_sched_group_barrier(0x100, NL, 0);
++        __builtin_amdgcn_sched_group_barrier(0x008, NL, 0);
++    }
++    __builtin_amdgcn_sched_group_barrier(0x008, 2 * NL, 0);
++}
++
++// The tile loop's barriers only order shared-memory accesses, as the RDNA4 decode band's do (flash_attn_ext_f16_iter_barrier
++// in fattn-mma-f16.cuh): its global reads are of buffers no thread of the grid writes, and __syncthreads() would also
++// invalidate the vector cache.
++static __device__ __forceinline__ void lf_fa_iter_barrier() {
++#if defined(AMD_WMMA_AVAILABLE)
++    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup", "local");
++    __builtin_amdgcn_s_barrier();
++    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
++#else
++    __syncthreads();
++#endif // defined(AMD_WMMA_AVAILABLE)
++}
++
++// The WMMAs of 2 accumulators go in turn (a WMMA right after the one that wrote its accumulator waits for it) where that
++// was measured faster on gfx1201: head 128, head 256 with 4 or more waves (with fewer, 2 accumulators spill in the loop),
++// head 64 with up to 3 waves (with more, up to 11% slower).  The other shapes keep one accumulator at a time.
++template <int G, int D>
++constexpr bool lf_interleave() { return D == 128 || (D == 256 && G >= 4) || (D == 64 && G <= 3); }
++
++// Operand-pair layout: along the reduction axis (K and Q: dims, V^T: keys) the 8-byte units of each 32-element group
++// are stored as (step 0, half 0), (step 1, half 0), (step 0, half 1), (step 1, half 1), so the lane that reads half h
++// finds the operands of two consecutive 16-wide WMMA steps in one 16-byte load.  K and Q use the same order, so the
++// dot products are unchanged.  lf_pair_unit maps a natural 8-byte unit index (0..3 in the group) to its slot.
++static __device__ __forceinline__ int lf_pair_unit(const int u) { return u == 1 ? 2 : (u == 2 ? 1 : u); }
++typedef float lf_v8f __attribute__((ext_vector_type(8)));
++
++// A KV row of one head in q8_0 (34-byte blocks: scale, 32 codes) or, R, in q8_0r (BigOne: the 256 codes, then the 8 group
++// scales; the same values): the scale of group b and the code of value i
++template <bool R> static __device__ __forceinline__ const half * lf_q8_scale(const char * row, const int b) {
++    return (const half *) (R ? row + 256 + 2 * b : row + b * 34);
++}
++template <bool R> static __device__ __forceinline__ const char * lf_q8_code(const char * row, const int i) {
++    return R ? row + i : row + (i / 32) * 34 + 2 + i % 32;
++}
++
++// 8 q8_0 values (one lane's share of a 256-vector: block l/4, bytes (l%4)*8 .. +7) as floats; 2-byte aligned reads
++template <bool R>
++static __device__ __forceinline__ void lf_q8_0_load8(const char * __restrict__ row, const int lane, float * v) {
++    const float d = __half2float(*lf_q8_scale<R>(row, lane / 4));
++    const uint16_t * q = (const uint16_t *) lf_q8_code<R>(row, lane * 8);
++#pragma unroll
++    for (int j = 0; j < 4; ++j) {
++        const uint16_t w = q[j];
++        v[2 * j + 0] = d * (float) (int8_t) (w & 0xFF);
++        v[2 * j + 1] = d * (float) (int8_t) (w >> 8);
++    }
++}
++
++// the conversion does not saturate: a value beyond +-448 becomes NaN, and a NaN V times a zero probability is still NaN.
++// Values scaled by their own amax never exceed 448; the clamp is the guarantee for anything else.
++static __device__ __forceinline__ float lf_fp8_sat(const float x) { return fminf(fmaxf(x, -448.f), 448.f); }
++
++static __device__ __forceinline__ uint2 lf_pack_fp8(const float * v, const float inv) {
++#if defined(RDNA4)
++    int w0 = __builtin_amdgcn_cvt_pk_fp8_f32(lf_fp8_sat(v[0] * inv), lf_fp8_sat(v[1] * inv), 0, false);
++    w0     = __builtin_amdgcn_cvt_pk_fp8_f32(lf_fp8_sat(v[2] * inv), lf_fp8_sat(v[3] * inv), w0, true);
++    int w1 = __builtin_amdgcn_cvt_pk_fp8_f32(lf_fp8_sat(v[4] * inv), lf_fp8_sat(v[5] * inv), 0, false);
++    w1     = __builtin_amdgcn_cvt_pk_fp8_f32(lf_fp8_sat(v[6] * inv), lf_fp8_sat(v[7] * inv), w1, true);
++    return make_uint2((uint32_t) w0, (uint32_t) w1);
++#else
++    GGML_UNUSED_VARS(v, inv);
++    return make_uint2(0, 0);
++#endif // defined(RDNA4)
++}
++
++// the sum of the eight fp8 values lf_pack_fp8 wrote, in fp32: the row sum must count each probability as the fp8 P.V WMMA
++// sees it.  Summed from the fp32 values instead, a weight below the smallest fp8 subnormal (about 2^-18 of the row's
++// running max) counted in l but not in O, so the output came out systematically small, more so the longer the context.
++static __device__ __forceinline__ float lf_sum_fp8(const uint2 w) {
++#if defined(RDNA4)
++    const int a = (int) w.x, b = (int) w.y;
++    return ((__builtin_amdgcn_cvt_f32_fp8(a, 0) + __builtin_amdgcn_cvt_f32_fp8(a, 1)) +
++            (__builtin_amdgcn_cvt_f32_fp8(a, 2) + __builtin_amdgcn_cvt_f32_fp8(a, 3))) +
++           ((__builtin_amdgcn_cvt_f32_fp8(b, 0) + __builtin_amdgcn_cvt_f32_fp8(b, 1)) +
++            (__builtin_amdgcn_cvt_f32_fp8(b, 2) + __builtin_amdgcn_cvt_f32_fp8(b, 3)));
++#else
++    GGML_UNUSED(w);
++    return 0.f;
++#endif // defined(RDNA4)
++}
++
++static __device__ __forceinline__ float lf_wave_max(float a) {
++#pragma unroll
++    for (int o = 16; o > 0; o >>= 1) a = fmaxf(a, __shfl_xor_sync(0xFFFFFFFF, a, o, 32));
++    return a;
++}
++
++// The cells this batch can see, for the amax passes and the conversions: a cell outside it (empty, another sequence, or not yet visible)
++// is never attended, and it must not set a scale either -- it may hold a previous request's data, which made the
++// scales (and so the output) depend on what ran before.  The conversions write it as zero: scaled by the visible amax
++// it could exceed the fp8 range (v3 turned such V values into NaN, and a NaN V times a zero probability is NaN).  Derived mask: the batch's [min tok_lo, max tok_hi] and
++// cell_pos != INT32_MIN; f16 mask: the last query's row (one causal sequence).  vr = (lo, hi), or (1, 0) when unknown.
++__global__ void lf_fa_vis_range(const int * __restrict__ tok_lo, const int * __restrict__ tok_hi, const int n_q, int2 * __restrict__ vr) {
++    int lo = INT32_MAX, hi = INT32_MIN;
++    for (int i = threadIdx.x; i < n_q; i += blockDim.x) { lo = min(lo, tok_lo[i]); hi = max(hi, tok_hi[i]); }
++#pragma unroll
++    for (int o = 16; o > 0; o >>= 1) {
++        lo = min(lo, __shfl_xor_sync(0xFFFFFFFF, lo, o, 32));
++        hi = max(hi, __shfl_xor_sync(0xFFFFFFFF, hi, o, 32));
++    }
++    __shared__ int2 w[8];
++    if (threadIdx.x % 32 == 0) w[threadIdx.x / 32] = make_int2(lo, hi);
++    __syncthreads();
++    if (threadIdx.x == 0) {
++        int2 r = w[0];
++        for (int k = 1; k < (int) (blockDim.x / 32); ++k) r = make_int2(min(r.x, w[k].x), max(r.y, w[k].y));
++        *vr = r;
++    }
++}
++
++static __device__ __forceinline__ bool lf_fa_cell_seen(const int j, const int * __restrict__ cell_pos, const int2 * __restrict__ vr,
++        const half * __restrict__ mlast) {
++    if (cell_pos) {
++        const int p = cell_pos[j];
++        return p != INT32_MIN && p >= vr->x && p <= vr->y;
++    }
++    if (mlast) return __half2float(mlast[j]) > -INFINITY;
++    return true;
++}
++
++// K: one wave per (cell, kv head) vector (lanes < D/8, 8 values each) -> k8[hk][j][D] fp8 with ONE scale per kv head
++// (amax from the q8_0 scales, see lf_fa_conv_v_amax), so the score scale is a single constant per (query, head);
++// ks[hk] (cells >= n_kv are zero)
++template <int D, bool R>
++__global__ void lf_fa_conv_k(const char * __restrict__ K, const int64_t nb11, const int64_t nb12, const int n_kv, const int n_kv_pad,
++        const int * __restrict__ cell_pos, const int2 * __restrict__ vr, const half * __restrict__ mlast,
++        const unsigned int * __restrict__ kbits, uint8_t * __restrict__ k8, float * __restrict__ ks) {
++    const int lane = threadIdx.x % 32, j = blockIdx.x * 8 + threadIdx.x / 32, hk = blockIdx.y;
++    if (j >= n_kv_pad) return;
++    float a = 0.f;
++#pragma unroll
++    for (int b = 0; b < D / 32; ++b) a = fmaxf(a, __uint_as_float(kbits[hk * (D / 32) + b]));
++    if (lane >= D / 8) return;
++    float v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
++    if (j < n_kv && lf_fa_cell_seen(j, cell_pos, vr, mlast)) lf_q8_0_load8<R>(K + j * nb11 + hk * nb12, lane, v);
++    const float inv = a > 0.f ? 448.f / a : 0.f;
++    *(uint2 *) (k8 + ((size_t) hk * n_kv_pad + j) * D + (lane / 4) * 32 + lf_pair_unit(lane % 4) * 8) = lf_pack_fp8(v, inv);
++    if (j == 0 && lane == 0) ks[hk] = a > 0.f ? a / 448.f : 0.f;
++}
++
++// V pass 1: per (kv head, group of 32 channels) amax over the cells the batch sees.  A q8_0 block's largest |value| is
++// exactly |d| * 127 (quantization maps the block's amax to +-127), so only the scales are read (1/17 of the cache).
++// Threads: (256 / NG) cells x NG = D/32 groups; chunks of 256 cells per block; atomicMax on the float bits.
++template <int D, bool R>
++__global__ void lf_fa_conv_v_amax(const char * __restrict__ V, const int64_t nb21, const int64_t nb22, const int n_kv,
++        const int * __restrict__ cell_pos, const int2 * __restrict__ vr, const half * __restrict__ mlast, unsigned int * __restrict__ vbits) {
++    constexpr int NG = D / 32;
++    const int hk = blockIdx.x, b = threadIdx.x % NG, jj = threadIdx.x / NG, j0 = blockIdx.y * 256;
++    float a = 0.f;
++    for (int j = j0 + jj; j < min(n_kv, j0 + 256); j += 256 / NG) {
++        if (!lf_fa_cell_seen(j, cell_pos, vr, mlast)) continue;
++        a = fmaxf(a, fabsf(__half2float(*lf_q8_scale<R>(V + j * nb21 + hk * nb22, b))));
++    }
++#pragma unroll
++    for (int o = NG; o < 32; o <<= 1) a = fmaxf(a, __shfl_xor_sync(0xFFFFFFFF, a, o, 32));
++    if (threadIdx.x % 32 < NG) atomicMax(&vbits[hk * NG + b], __float_as_uint(a * 127.f));
++}
++template <int D>
++__global__ void lf_fa_conv_v_scale(const unsigned int * __restrict__ vbits, float * __restrict__ vs) {
++    const float a = __uint_as_float(vbits[blockIdx.x * (D / 32) + threadIdx.x / 32]);
++    vs[blockIdx.x * D + threadIdx.x] = a > 0.f ? a / 448.f : 1.f;
++}
++// V pass 2: 64 cells x D channels of one kv head (D threads), transposed through LDS -> v8t[hk][d][j]
++template <int D, bool R>
++__global__ void lf_fa_conv_v(const char * __restrict__ V, const int64_t nb21, const int64_t nb22, const int n_kv, const int n_kv_pad,
++        const int * __restrict__ cell_pos, const int2 * __restrict__ vr, const half * __restrict__ mlast,
++        const float * __restrict__ vs, uint8_t * __restrict__ v8t) {
++#if defined(RDNA4)
++    const int j0 = blockIdx.x * 64, hk = blockIdx.y, i = threadIdx.x;
++    __shared__ uint8_t tile[D][64 + 4];
++    const float inv = vs[hk * D + i] > 0.f ? 1.f / vs[hk * D + i] : 0.f;
++    for (int jj = 0; jj < 64; ++jj) {
++        const int j = j0 + jj;
++        uint8_t q = 0;
++        if (j < n_kv && lf_fa_cell_seen(j, cell_pos, vr, mlast)) {
++            const char * row = V + j * nb21 + hk * nb22;
++            q = (uint8_t) __builtin_amdgcn_cvt_pk_fp8_f32(lf_fp8_sat(__half2float(*lf_q8_scale<R>(row, i / 32)) * (float) (int8_t) *lf_q8_code<R>(row, i) * inv), 0.f, 0, false);
++        }
++        tile[i][(jj / 32) * 32 + lf_pair_unit((jj % 32) / 8) * 8 + jj % 8] = q;
++    }
++    __syncthreads();
++    for (int c = i; c < D * 4; c += D) {
++        const int r = c / 4, o = c % 4;
++        uint32_t w[4];
++#pragma unroll
++        for (int k = 0; k < 4; ++k) {
++            const uint8_t * t = &tile[r][o * 16 + 4 * k];
++            w[k] = t[0] | (t[1] << 8) | (t[2] << 16) | ((uint32_t) t[3] << 24);
++        }
++        *(uint4 *) (v8t + ((size_t) hk * D + r) * n_kv_pad + j0 + o * 16) = make_uint4(w[0], w[1], w[2], w[3]);
++    }
++#else
++    GGML_UNUSED_VARS(V, nb21, nb22, n_kv, n_kv_pad, cell_pos, vr, mlast, vs, v8t);
++    NO_DEVICE_CODE;
++#endif // defined(RDNA4)
++}
++// q8_0r: K and V pass 1 in one launch (blockIdx.z: 0 = K into kbits, 1 = V into vbits), the maxima of lf_fa_conv_v_amax:
++// 128 cells a block (independent loads), the block's maxima reduced in LDS, then NG atomics a block instead of NG a wave.
++// The old pass was latency-bound (5.3 ms for both at a 2048-token batch, 87K deep).  max(|d|) * 127 is the max of |d| * 127
++// (the product rounds monotonically), so the bits are the same.  FRANK_FA_FP8_CONV=0: the old passes.
++template <int D, bool R>
++__global__ void lf_fa_conv_kv_amax(const char * __restrict__ K, const int64_t nb11, const int64_t nb12,
++        const char * __restrict__ V, const int64_t nb21, const int64_t nb22, const int n_kv,
++        const int * __restrict__ cell_pos, const int2 * __restrict__ vr, const half * __restrict__ mlast,
++        unsigned int * __restrict__ kbits, unsigned int * __restrict__ vbits) {
++    constexpr int NG = D / 32, CPB = 128, CPP = 256 / NG;   // groups, cells a block, cells a pass
++    const bool isv = blockIdx.z != 0;
++    const char * X = isv ? V : K;
++    const int64_t nb1 = isv ? nb21 : nb11, nb2 = isv ? nb22 : nb12;
++    const int hk = blockIdx.x, b = threadIdx.x % NG, jj = threadIdx.x / NG, j0 = blockIdx.y * CPB;
++    float a = 0.f;
++#pragma unroll
++    for (int k = 0; k < CPB / CPP; ++k) {
++        const int j = j0 + k * CPP + jj;
++        if (j < n_kv && lf_fa_cell_seen(j, cell_pos, vr, mlast)) {
++            a = fmaxf(a, fabsf(__half2float(*lf_q8_scale<R>(X + j * nb1 + hk * nb2, b))));
++        }
++    }
++#pragma unroll
++    for (int o = NG; o < 32; o <<= 1) a = fmaxf(a, __shfl_xor_sync(0xFFFFFFFF, a, o, 32));
++    __shared__ float s[256 / 32][NG];
++    if (threadIdx.x % 32 < NG) s[threadIdx.x / 32][b] = a;
++    __syncthreads();
++    if (threadIdx.x < NG) {
++        float m = s[0][threadIdx.x];
++#pragma unroll
++        for (int w = 1; w < 256 / 32; ++w) m = fmaxf(m, s[w][threadIdx.x]);
++        atomicMax(&(isv ? vbits : kbits)[hk * NG + threadIdx.x], __float_as_uint(m * 127.f));
++    }
++}
++// q8_0r: V pass 2 with 8-byte code loads, the values of lf_fa_conv_v (scale * code * inv, rounded once): D/8 lanes a cell,
++// each converting 8 channels of one 32-channel group (one scale, one inv), D/(D/8) = 8 cells a pass; the same transposed
++// tile and store.  The old pass read one code byte a thread a cell (64 dependent rounds), ~42% of the bandwidth.
++template <int D>
++__global__ void lf_fa_conv_v8(const char * __restrict__ V, const int64_t nb21, const int64_t nb22, const int n_kv, const int n_kv_pad,
++        const int * __restrict__ cell_pos, const int2 * __restrict__ vr, const half * __restrict__ mlast,
++        const float * __restrict__ vs, uint8_t * __restrict__ v8t) {
++#if defined(RDNA4)
++    constexpr int LPC = D / 8, CPP = D / LPC;   // lanes a cell, cells a pass
++    const int j0 = blockIdx.x * 64, hk = blockIdx.y, i = threadIdx.x;
++    const int u = i % LPC, cl = i / LPC;        // channels 8u .. 8u+7 of cell cl of each pass
++    __shared__ uint8_t tile[D][64 + 4];
++    const float inv = vs[hk * D + 8 * u] > 0.f ? 1.f / vs[hk * D + 8 * u] : 0.f;
++#pragma unroll
++    for (int p = 0; p < 64; p += CPP) {
++        const int jj = p + cl, j = j0 + jj;
++        uint32_t w0 = 0, w1 = 0;
++        if (j < n_kv && lf_fa_cell_seen(j, cell_pos, vr, mlast)) {
++            const char * row = V + j * nb21 + hk * nb22;
++            const float d = __half2float(*lf_q8_scale<true>(row, u / 4));
++            const uint2 c = *(const uint2 *) lf_q8_code<true>(row, 8 * u);
++            uint8_t q[8];
++#pragma unroll
++            for (int e = 0; e < 8; ++e) {
++                const int8_t code = (int8_t) (((e < 4 ? c.x : c.y) >> (8 * (e % 4))) & 0xFF);
++                q[e] = (uint8_t) __builtin_amdgcn_cvt_pk_fp8_f32(lf_fp8_sat(d * (float) code * inv), 0.f, 0, false);
++            }
++            w0 = q[0] | (q[1] << 8) | (q[2] << 16) | ((uint32_t) q[3] << 24);
++            w1 = q[4] | (q[5] << 8) | (q[6] << 16) | ((uint32_t) q[7] << 24);
++        }
++        const int col = (jj / 32) * 32 + lf_pair_unit((jj % 32) / 8) * 8 + jj % 8;
++#pragma unroll
++        for (int e = 0; e < 8; ++e) tile[8 * u + e][col] = (uint8_t) (((e < 4 ? w0 : w1) >> (8 * (e % 4))) & 0xFF);
++    }
++    __syncthreads();
++    for (int c = i; c < D * 4; c += D) {
++        const int r = c / 4, o = c % 4;
++        uint32_t w[4];
++#pragma unroll
++        for (int k = 0; k < 4; ++k) {
++            const uint8_t * t = &tile[r][o * 16 + 4 * k];
++            w[k] = t[0] | (t[1] << 8) | (t[2] << 16) | ((uint32_t) t[3] << 24);
++        }
++        *(uint4 *) (v8t + ((size_t) hk * D + r) * n_kv_pad + j0 + o * 16) = make_uint4(w[0], w[1], w[2], w[3]);
++    }
++#else
++    GGML_UNUSED_VARS(V, nb21, nb22, n_kv, n_kv_pad, cell_pos, vr, mlast, vs, v8t);
++    NO_DEVICE_CODE;
++#endif // defined(RDNA4)
++}
++
++// FRANK_FA_FP8_CONV_CHECK=1 (testing only): the old passes into scratch, compared byte for byte with the new ones
++__device__ unsigned long long lf_fa_conv_n_checked = 0, lf_fa_conv_n_bad = 0;
++static __global__ void lf_fa_conv_cmp(const uint32_t * __restrict__ a, const uint32_t * __restrict__ b, const int64_t n, const int what) {
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    const unsigned long long c = atomicAdd(&lf_fa_conv_n_checked, 1ull) + 1;
++    if (a[i] != b[i]) {
++        const unsigned long long nb = atomicAdd(&lf_fa_conv_n_bad, 1ull);
++        if (nb < 8) printf("fa fp8 conv check: %s word %lld differs: %08x vs %08x\n", what == 0 ? "kbits" : what == 1 ? "vbits" : "v8t",
++                           (long long) i, a[i], b[i]);
++    }
++    if (c == 1 || (c & ((1ull << 24) - 1)) == 0) printf("fa fp8 conv check: %llu words checked, %llu differ\n", c, lf_fa_conv_n_bad);
++}
++
++// Q: one wave per (token, head) vector (lanes < D/8) -> q8[t][h][D], qs[t][h] (tokens >= n_q are zero)
++template <int D>
++__global__ void lf_fa_conv_q(const char * __restrict__ Q, const int64_t nb01, const int64_t nb02, const int n_q, const int n_q_pad, const int HQ,
++        uint8_t * __restrict__ q8, float * __restrict__ qs) {
++    const int lane = threadIdx.x % 32, t = blockIdx.x * 8 + threadIdx.x / 32, h = blockIdx.y;
++    if (t >= n_q_pad) return;
++    float v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
++    if (t < n_q && lane < D / 8) {
++        const float4 * p = (const float4 *) (Q + t * nb01 + h * nb02 + lane * 32);
++        const float4 a = p[0], b = p[1];
++        v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w; v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w;
++    }
++    float a = 0.f;
++#pragma unroll
++    for (int i = 0; i < 8; ++i) a = fmaxf(a, fabsf(v[i]));
++    a = lf_wave_max(a);
++    const float inv = a > 0.f ? 448.f / a : 0.f;
++    if (lane < D / 8) *(uint2 *) (q8 + ((size_t) t * HQ + h) * D + (lane / 4) * 32 + lf_pair_unit(lane % 4) * 8) = lf_pack_fp8(v, inv);
++    if (lane == 0) qs[(size_t) t * HQ + h] = a > 0.f ? a / 448.f : 0.f;
++}
++
++// derived mask: per 64-key tile, the (min, max) cell position (INT32_MIN in .x when a cell of the tile is never visible)
++__global__ void lf_fa_tile_range(const int * __restrict__ cell_pos, const int n_kv, int2 * __restrict__ trange) {
++    const int j = blockIdx.x * LF_KT + threadIdx.x;   // 64 threads
++    const int p = j < n_kv ? cell_pos[j] : INT32_MIN;
++    int mn = p, mx = p;
++#pragma unroll
++    for (int o = 16; o > 0; o >>= 1) {
++        mn = min(mn, __shfl_xor_sync(0xFFFFFFFF, mn, o, 32));
++        mx = max(mx, __shfl_xor_sync(0xFFFFFFFF, mx, o, 32));
++    }
++    __shared__ int2 w[2];
++    if (threadIdx.x % 32 == 0) w[threadIdx.x / 32] = make_int2(mn, mx);
++    __syncthreads();
++    if (threadIdx.x == 0) trange[blockIdx.x] = make_int2(min(w[0].x, w[1].x), max(w[0].y, w[1].y));
++}
++
++// Block = one kv head x TQB groups of LF_QB tokens; wave w = Q head hk*G + w%G for group w/G.  Visibility: derived (cell_pos,
++// tok_lo, tok_hi) or an f16 mask tensor (added), or none.  Writes a split's unnormalized O (x vs) and (max, sum).
++// QK and PV issue their WMMAs in the order lf_interleave() picks; each accumulator adds its products in the same order either way.
++// TQB > 1 (BigOne 6c): the groups share the K / V tile staging (one tile in LDS for TQB*LF_QB tokens instead of one a
++// LF_QB-token block); each wave keeps its group's window, full-tile test and tile skips, the same splits and the same
++// arithmetic, so its partial is bit for bit the TQB = 1 block's.  A tile no wave needs is not staged.
++template <int G, int D, int TQB = 1>
++__global__ void __launch_bounds__(TQB * G * 32, 1) lf_fa_attn(
++        const uint8_t * __restrict__ q8, const float * __restrict__ qs,
++        const uint8_t * __restrict__ k8, const float * __restrict__ ks,
++        const uint8_t * __restrict__ v8t, const float * __restrict__ vs,
++        const int * __restrict__ cell_pos, const int * __restrict__ tok_lo, const int * __restrict__ tok_hi, const int2 * __restrict__ trange,
++        const char * __restrict__ mask, const int64_t nb31,
++        half * __restrict__ part, float2 * __restrict__ ml,
++        const int n_q, const int n_q_pad, const int n_kv, const int n_kv_pad, const float scale_log2) {
++#if defined(RDNA4)
++    constexpr int LF_KS = D + 16;      // LDS bytes per key row of K
++    __shared__ __attribute__((aligned(16))) uint8_t Ks[LF_KT * LF_KS];
++    __shared__ __attribute__((aligned(16))) uint8_t Vs[D * LF_VS];
++    const int tid = threadIdx.x, lane = tid % 32, g = (tid / 32) % G, tg = tid / 32 / G;
++    const int HQ = gridDim.y * G;
++    const int t0 = (blockIdx.x * TQB + tg) * LF_QB, hk = blockIdx.y, h = hk * G + g;
++    const bool dead = TQB > 1 && t0 >= n_q_pad;   // a group past the padded queries: stages tiles, computes and stores nothing
++    const int tq = t0 + lane % 16;
++    const int tqc = min(tq, n_q - 1);
++    const int lo = cell_pos ? tok_lo[tqc] : 0, hi = cell_pos ? tok_hi[tqc] : 0;
++    const half * mrow = mask ? (const half *) (mask + (int64_t) tqc * nb31) : nullptr;
++    // the block's query window (derived mask): a tile whose cells all lie in [lo_max, hi_min] is visible to every query
++    int lo_max = lo, lo_min = lo, hi_min = hi, hi_max = hi;
++#pragma unroll
++    for (int o = 1; o < 16; o <<= 1) {
++        lo_max = max(lo_max, __shfl_xor_sync(0xFFFFFFFF, lo_max, o, 32)); lo_min = min(lo_min, __shfl_xor_sync(0xFFFFFFFF, lo_min, o, 32));
++        hi_min = min(hi_min, __shfl_xor_sync(0xFFFFFFFF, hi_min, o, 32)); hi_max = max(hi_max, __shfl_xor_sync(0xFFFFFFFF, hi_max, o, 32));
++    }
++    // TQB > 1: the union of the groups' windows decides whether the block stages a tile at all
++    int blo_min = lo_min, bhi_max = hi_max;
++    if constexpr (TQB > 1) {
++        __shared__ int2 s_win[TQB];
++        if (g == 0 && lane == 0) s_win[tg] = dead ? make_int2(INT32_MAX, INT32_MIN) : make_int2(lo_min, hi_max);
++        __syncthreads();
++#pragma unroll
++        for (int i = 0; i < TQB; ++i) { blo_min = min(blo_min, s_win[i].x); bhi_max = max(bhi_max, s_win[i].y); }
++    }
++
++    lf_v2i qa[D / 16];
++#pragma unroll
++    for (int g2 = 0; g2 < D / 32; ++g2) {
++        const lf_v4i q4 = dead ? lf_v4i{0, 0, 0, 0} : *(const lf_v4i *) (q8 + ((size_t) tq * HQ + h) * D + g2 * 32 + (lane / 16) * 16);
++        qa[2 * g2] = lf_v2i{q4.x, q4.y}; qa[2 * g2 + 1] = lf_v2i{q4.z, q4.w};
++    }
++    const float kqc = dead ? 0.f : qs[(size_t) tq * HQ + h] * ks[hk] * scale_log2;  // score = kqc * (K8 . Q8), log2 domain
++    constexpr bool ORD  = lf_interleave<G, D>();
++    constexpr int  NACC = 2;
++
++    lf_v8f o[D / 16];
++#pragma unroll
++    for (int i = 0; i < D / 16; ++i) o[i] = lf_v8f{0, 0, 0, 0, 0, 0, 0, 0};
++    float m = -INFINITY, l = 0.f;
++
++    const int ntile = n_kv_pad / LF_KT;
++    const int nsplit = gridDim.z, per = (ntile + nsplit - 1) / nsplit;
++    const int kt_begin = blockIdx.z * per, kt_end = min(ntile, kt_begin + per);
++    for (int kt = kt_begin; kt < kt_end; ++kt) {
++        const int k0 = kt * LF_KT;
++        // tile visibility (derived mask): skip tiles no query of the block sees; "full" tiles need no per-element test.
++        // Everything here is uniform over the block (all waves share the tokens).
++        bool full = cell_pos == nullptr && mrow == nullptr && k0 + LF_KT <= n_kv;
++        bool wskip = dead;   // this wave computes nothing on the tile (TQB > 1)
++        if (cell_pos) {
++            const int2 r = trange[kt];
++            if (r.y < blo_min || (r.x != INT32_MIN && r.x > bhi_max)) continue;             // no query of the block sees any cell
++            if constexpr (TQB > 1) wskip = wskip || r.y < lo_min || (r.x != INT32_MIN && r.x > hi_max);   // none of this group's
++            full = r.x != INT32_MIN && r.x >= lo_max && r.y <= hi_min && k0 + LF_KT <= n_kv;
++        }
++
++        // tile loads without conditions or clamped indices: chunk c = tid + i*NT for the full rounds, then the remainder
++        // chunks loaded by every thread (duplicates rewrite the same bytes).  Walking pointers (base + i * step) keep the
++        // register cost independent of the number of rounds (small G has many).  K's tile is contiguous in k8; V^T's
++        // rows are n_kv_pad apart.  NT is a multiple of 32, so (c / 4, c % 4) and (c / (D/16), c % (D/16)) advance by
++        // fixed amounts per round.
++        {
++            constexpr int NT = TQB * G * 32, NC = LF_KT * (D / 16), NFULL = NC / NT, NREM = NC - NFULL * NT, NB = 3;
++            static_assert(NT % (D / 16) == 0 || (D / 16) % NT == 0, "K chunk walk");
++            const uint8_t * kb = k8 + ((size_t) hk * n_kv_pad + k0) * D;
++            const uint8_t * vb = v8t + (size_t) hk * D * n_kv_pad + k0;
++            auto kst_off = [&](const int c) { return (c / (D / 16)) * LF_KS + (c % (D / 16)) * 16; };
++            auto vst_off = [&](const int c) { return (c / (LF_KT / 16)) * LF_VS + (c % (LF_KT / 16)) * 16; };
++            {
++                const uint8_t * kp = kb + (size_t) tid * 16;
++#pragma unroll
++                for (int i0 = 0; i0 < NFULL; i0 += NB) {
++                    uint4 w[NB];
++#pragma unroll
++                    for (int i = 0; i < NB; ++i) if (i0 + i < NFULL) w[i] = *(const uint4 *) (kp + (size_t) (i0 + i) * NT * 16);
++#pragma unroll
++                    for (int i = 0; i < NB; ++i) if (i0 + i < NFULL) *(uint4 *) &Ks[kst_off(tid + (i0 + i) * NT)] = w[i];
++                    __builtin_amdgcn_sched_barrier(0);
++                }
++                if constexpr (NREM > 0) { const int c = NFULL * NT + tid % NREM; *(uint4 *) &Ks[kst_off(c)] = *(const uint4 *) (kb + (size_t) c * 16); }
++            }
++            {
++                const uint8_t * vp = vb + (size_t) (tid / (LF_KT / 16)) * n_kv_pad + (tid % (LF_KT / 16)) * 16;
++                const size_t vstep = (size_t) (NT / (LF_KT / 16)) * n_kv_pad;
++#pragma unroll
++                for (int i0 = 0; i0 < NFULL; i0 += NB) {
++                    uint4 w[NB];
++#pragma unroll
++                    for (int i = 0; i < NB; ++i) if (i0 + i < NFULL) w[i] = *(const uint4 *) (vp + (i0 + i) * vstep);
++#pragma unroll
++                    for (int i = 0; i < NB; ++i) if (i0 + i < NFULL) *(uint4 *) &Vs[vst_off(tid + (i0 + i) * NT)] = w[i];
++                    __builtin_amdgcn_sched_barrier(0);
++                }
++                if constexpr (NREM > 0) {
++                    const int c = NFULL * NT + tid % NREM;
++                    *(uint4 *) &Vs[vst_off(c)] = *(const uint4 *) (vb + (size_t) (c / (LF_KT / 16)) * n_kv_pad + (c % (LF_KT / 16)) * 16);
++                }
++            }
++        }
++        lf_fa_iter_barrier();
++
++        if (!wskip) {   // wave-uniform; TQB = 1: always
++        lf_v8f s[LF_KT / 16];
++        if constexpr (ORD) {
++#pragma unroll
++        for (int ks0 = 0; ks0 < LF_KT / 16; ks0 += NACC) {
++#pragma unroll
++            for (int j = 0; j < NACC; ++j) s[ks0 + j] = lf_v8f{0, 0, 0, 0, 0, 0, 0, 0};
++#pragma unroll
++            for (int g2 = 0; g2 < D / 32; ++g2) {
++                lf_v4i k4[NACC];
++#pragma unroll
++                for (int j = 0; j < NACC; ++j) k4[j] = *(const lf_v4i *) &Ks[((ks0 + j) * 16 + lane % 16) * LF_KS + g2 * 32 + (lane / 16) * 16];
++#pragma unroll
++                for (int j = 0; j < NACC; ++j)
++                    s[ks0 + j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(lf_v2i{k4[j].x, k4[j].y}, qa[2 * g2],     s[ks0 + j]);
++#pragma unroll
++                for (int j = 0; j < NACC; ++j)
++                    s[ks0 + j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(lf_v2i{k4[j].z, k4[j].w}, qa[2 * g2 + 1], s[ks0 + j]);
++            }
++        }
++        lf_pipe_ds_wmma_grp<(LF_KT / 16 / NACC) * (D / 32), NACC>();
++        } else {
++#pragma unroll
++        for (int ks_ = 0; ks_ < LF_KT / 16; ++ks_) {
++            s[ks_] = lf_v8f{0, 0, 0, 0, 0, 0, 0, 0};
++#pragma unroll
++            for (int g2 = 0; g2 < D / 32; ++g2) {
++                const lf_v4i k4 = *(const lf_v4i *) &Ks[(ks_ * 16 + lane % 16) * LF_KS + g2 * 32 + (lane / 16) * 16];
++                s[ks_] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(lf_v2i{k4.x, k4.y}, qa[2 * g2],     s[ks_]);
++                s[ks_] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(lf_v2i{k4.z, k4.w}, qa[2 * g2 + 1], s[ks_]);
++            }
++        }
++        lf_pipe_ds_wmma<(LF_KT / 16) * (D / 32)>();
++        }
++        float mt = -INFINITY;
++        float cc = kqc;   // full tiles keep the raw dot products (scaled inside the exp2's fma); others are pre-scaled
++        if (full) {
++#pragma unroll
++            for (int ks_ = 0; ks_ < LF_KT / 16; ++ks_)
++#pragma unroll
++                for (int v = 0; v < 8; ++v) mt = fmaxf(mt, s[ks_][v]);
++            mt *= kqc;    // kqc >= 0
++        } else {
++            cc = 1.f;
++#pragma unroll
++            for (int ks_ = 0; ks_ < LF_KT / 16; ++ks_)
++#pragma unroll
++                for (int v = 0; v < 8; ++v) {
++                    const int kk = ks_ * 16 + v + 8 * (lane / 16), j = k0 + kk;
++                    float x = s[ks_][v] * kqc;
++                    bool vis = j < n_kv;
++                    if (vis && cell_pos) {
++                        const int p = cell_pos[j];
++                        vis = p >= lo && p <= hi;
++                    }
++                    if (vis && mrow) x += __half2float(mrow[j]) * 1.4426950408889634f; // scores are in the log2 domain
++                    x = vis ? x : -INFINITY;
++                    s[ks_][v] = x;
++                    mt = fmaxf(mt, x);
++                }
++        }
++        mt = fmaxf(mt, __shfl_xor_sync(0xFFFFFFFF, mt, 16, 32));
++        const float mn    = fmaxf(m, mt);
++        const float alpha = mn == -INFINITY ? 1.f : __builtin_amdgcn_exp2f(m - mn);
++        const float msub  = (mn == -INFINITY ? 0.f : mn) - 8.f;   // P is produced x 2^8 (fp8 range), l likewise
++        m = mn;
++        float ls = 0.f;
++        lf_v2i p8[LF_KT / 16];
++#pragma unroll
++        for (int ks_ = 0; ks_ < LF_KT / 16; ++ks_) {
++            float p[8];
++#pragma unroll
++            for (int v = 0; v < 8; ++v) p[v] = __builtin_amdgcn_exp2f(fmaf(s[ks_][v], cc, -msub));
++            const uint2 w = lf_pack_fp8(p, 1.f);
++            ls += lf_sum_fp8(w);
++            p8[ks_] = lf_v2i{(int) w.x, (int) w.y};
++        }
++        l = l * alpha + ls;
++        if (__ballot(alpha != 1.f)) { // the running max moved for some query of this wave (exact: x * 1 == x)
++#pragma unroll
++            for (int i = 0; i < D / 16; ++i) o[i] *= alpha;
++        }
++        if constexpr (ORD) {
++#pragma unroll
++        for (int g2 = 0; g2 < LF_KT / 32; ++g2)
++#pragma unroll
++            for (int i0 = 0; i0 < D / 16; i0 += NACC) {
++                lf_v4i v4[NACC];
++#pragma unroll
++                for (int j = 0; j < NACC; ++j) v4[j] = *(const lf_v4i *) &Vs[((i0 + j) * 16 + lane % 16) * LF_VS + g2 * 32 + (lane / 16) * 16];
++#pragma unroll
++                for (int j = 0; j < NACC; ++j)
++                    o[i0 + j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(lf_v2i{v4[j].x, v4[j].y}, p8[2 * g2],     o[i0 + j]);
++#pragma unroll
++                for (int j = 0; j < NACC; ++j)
++                    o[i0 + j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(lf_v2i{v4[j].z, v4[j].w}, p8[2 * g2 + 1], o[i0 + j]);
++            }
++        lf_pipe_ds_wmma_grp<(LF_KT / 32) * (D / 16 / NACC), NACC>();
++        } else {
++#pragma unroll
++        for (int i = 0; i < D / 16; ++i)
++#pragma unroll
++            for (int g2 = 0; g2 < LF_KT / 32; ++g2) {
++                const lf_v4i v4 = *(const lf_v4i *) &Vs[(i * 16 + lane % 16) * LF_VS + g2 * 32 + (lane / 16) * 16];
++                o[i] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(lf_v2i{v4.x, v4.y}, p8[2 * g2],     o[i]);
++                o[i] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(lf_v2i{v4.z, v4.w}, p8[2 * g2 + 1], o[i]);
++            }
++        lf_pipe_ds_wmma<(D / 16) * (LF_KT / 32)>();
++        }
++        }   // !wskip
++        lf_fa_iter_barrier();
++    }
++    l += __shfl_xor_sync(0xFFFFFFFF, l, 16, 32);
++    if (tq >= n_q) return;
++    // partial result normalized by its own sum (a weighted mean of V, so f16 holds it); the combine re-weights by l
++    half * po = part + (size_t) blockIdx.z * n_q_pad * HQ * D;
++    const float linv = l > 0.f ? 1.f / l : 0.f;
++#pragma unroll
++    for (int i = 0; i < D / 16; ++i)
++#pragma unroll
++        for (int v = 0; v < 8; ++v) {
++            const int d = i * 16 + v + 8 * (lane / 16);
++            po[((size_t) tq * HQ + h) * D + d] = __float2half(o[i][v] * vs[hk * D + d] * linv);
++        }
++    if (lane < 16) ml[(size_t) blockIdx.z * n_q_pad * HQ + (size_t) tq * HQ + h] = make_float2(m, l);
++#else
++    GGML_UNUSED_VARS(q8, qs, k8, ks, v8t, vs, cell_pos, tok_lo, tok_hi, trange, mask, nb31, part, ml, n_q, n_q_pad, n_kv, n_kv_pad, scale_log2);
++    NO_DEVICE_CODE;
++#endif // defined(RDNA4)
++}
++
++// FRANK_FA_FP8_ATTN_CHECK=1 (testing only): a TQB > 1 launch's partials against the TQB = 1 blocks', rows t < n_q
++__device__ unsigned long long lf_fa_attn_n_checked = 0, lf_fa_attn_n_bad = 0;
++template <int D>
++__global__ void lf_fa_attn_cmp(const half * __restrict__ pa, const half * __restrict__ pb, const float2 * __restrict__ ma,
++        const float2 * __restrict__ mb, const int n_q_pad, const int HQ) {
++    const int row = blockIdx.x, sp = blockIdx.y, d = threadIdx.x;
++    const size_t r = (size_t) sp * n_q_pad * HQ + row;
++    const uint16_t a = __half_as_ushort(pa[r * D + d]), b = __half_as_ushort(pb[r * D + d]);
++    bool bad = a != b;
++    if (d == 0) bad = bad || __float_as_uint(ma[r].x) != __float_as_uint(mb[r].x) || __float_as_uint(ma[r].y) != __float_as_uint(mb[r].y);
++    const unsigned long long c = atomicAdd(&lf_fa_attn_n_checked, 1ull) + 1;
++    if (bad) {
++        const unsigned long long nb = atomicAdd(&lf_fa_attn_n_bad, 1ull);
++        if (nb < 8) printf("fa fp8 attn check: split %d row %d dim %d differs: %04x vs %04x (m, l %g %g vs %g %g)\n", sp, row, d, a, b,
++                           ma[r].x, ma[r].y, mb[r].x, mb[r].y);
++    }
++    if (c == 1 || (c & ((1ull << 24) - 1)) == 0) printf("fa fp8 attn check: %llu values checked, %llu differ\n", c, lf_fa_attn_n_bad);
++}
++
++// merge the splits: out[t][h][d] = sum_s w_s O_s / sum_s w_s l_s, w_s = 2^(m_s - M); (fully masked rows: 0)
++template <int D>
++__global__ void lf_fa_combine(const half * __restrict__ part, const float2 * __restrict__ ml, float * __restrict__ dst,
++        const int n_q_pad, const int HQ, const int nsplit) {
++    const int row = blockIdx.x, d = threadIdx.x; // row = t*HQ + h
++    float M = -INFINITY;
++    for (int s = 0; s < nsplit; ++s) M = fmaxf(M, ml[(size_t) s * n_q_pad * HQ + row].x);
++    float num = 0.f, den = 0.f;
++    if (M != -INFINITY) {
++        for (int s = 0; s < nsplit; ++s) {
++            const float2 v = ml[(size_t) s * n_q_pad * HQ + row];
++            if (v.x == -INFINITY) continue;
++            const float w = exp2f(v.x - M);
++            num += w * v.y * __half2float(part[(size_t) s * n_q_pad * HQ * D + (size_t) row * D + d]);
++            den += w * v.y;
++        }
++    }
++    dst[(size_t) row * D + d] = den > 0.f ? num / den : 0.f;
++}
++
++// the same merge with four rows a block and four dims a thread (8-byte part loads, 16-byte stores): the one-row blocks
++// stayed near 290-370 GB/s, this one 570-600 (BigOne 6, f8bench).  Each output's statements are the one-row kernel's, in
++// the same split order.  FRANK_FA_FP8_COMBINE4=0: the one-row kernel.
++template <int D>
++__global__ void lf_fa_combine4(const half * __restrict__ part, const float2 * __restrict__ ml, float * __restrict__ dst,
++        const int n_q_pad, const int HQ, const int nsplit, const int nrows) {
++    const int row = blockIdx.x * 4 + threadIdx.x / (D / 4), d = 4 * (threadIdx.x % (D / 4)); // row = t*HQ + h
++    if (row >= nrows) return;
++    float M = -INFINITY;
++    for (int s = 0; s < nsplit; ++s) M = fmaxf(M, ml[(size_t) s * n_q_pad * HQ + row].x);
++    float num0 = 0.f, num1 = 0.f, num2 = 0.f, num3 = 0.f, den = 0.f;
++    if (M != -INFINITY) {
++        for (int s = 0; s < nsplit; ++s) {
++            const float2 v = ml[(size_t) s * n_q_pad * HQ + row];
++            if (v.x == -INFINITY) continue;
++            const float w = exp2f(v.x - M);
++            const uint2 u = *(const uint2 *) &part[(size_t) s * n_q_pad * HQ * D + (size_t) row * D + d];
++            const half2 p0 = *(const half2 *) &u.x, p1 = *(const half2 *) &u.y;
++            num0 += w * v.y * __low2float(p0);
++            num1 += w * v.y * __high2float(p0);
++            num2 += w * v.y * __low2float(p1);
++            num3 += w * v.y * __high2float(p1);
++            den += w * v.y;
++        }
++    }
++    float4 o;
++    o.x = den > 0.f ? num0 / den : 0.f;
++    o.y = den > 0.f ? num1 / den : 0.f;
++    o.z = den > 0.f ? num2 / den : 0.f;
++    o.w = den > 0.f ? num3 / den : 0.f;
++    *(float4 *) &dst[(size_t) row * D + d] = o;
++}
++
++// FRANK_FA_FP8_COMBINE_CHECK=1 (testing only): the four-row merge against the one-row kernel's, bit for bit
++__device__ unsigned long long lf_fa_comb_n_checked = 0, lf_fa_comb_n_bad = 0;
++__global__ void lf_fa_combine_cmp(const float * __restrict__ a, const float * __restrict__ b, const int64_t n) {
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    const uint32_t x = __float_as_uint(a[i]), y = __float_as_uint(b[i]);
++    const unsigned long long c = atomicAdd(&lf_fa_comb_n_checked, 1ull) + 1;
++    if (x != y) {
++        const unsigned long long nb = atomicAdd(&lf_fa_comb_n_bad, 1ull);
++        if (nb < 8) printf("fa fp8 combine check: value %lld differs: %08x vs %08x\n", (long long) i, x, y);
++    }
++    if (c == 1 || (c & ((1ull << 26) - 1)) == 0) printf("fa fp8 combine check: %llu values checked, %llu differ\n", c, lf_fa_comb_n_bad);
++}
++
++// One persistent scratch per stream for a call's operands (fp8 K, fp8 V^T, fp8 Q, their scales, the split partials),
++// sized on first use for the whole KV cache (the K view's source tensor) and never shrunk, so a growing prefix does
++// not reallocate (each reallocation waits for the stream: growing by 25% cost 1.5% of a 30K prefill).  The ggml pool keeps every size it has handed out, and these requests grow
++// with the prefix, so a long prefill left one buffer per size behind (Q5_K_M 100K: +2.2 GiB, and on Windows that spills
++// into shared memory instead of failing).  Per stream: the main and the draft model may run on different streams.
++struct lf_fa_arena {
++    char * ptr  = nullptr;
++    size_t size = 0;
++};
++std::mutex g_lf_fa_arena_mutex;
++std::map<cudaStream_t, lf_fa_arena> g_lf_fa_arena;
++
++// nullptr when the device has no room (the caller then takes one pool buffer for this call).  need: this call;
++// want: the size for the whole cache, allocated when the scratch has to grow
++char * lf_fa_arena_get(cudaStream_t stream, const size_t need, const size_t want) {
++    std::lock_guard<std::mutex> lock(g_lf_fa_arena_mutex);
++    lf_fa_arena & a = g_lf_fa_arena[stream];
++    if (a.size < need) {
++        if (a.ptr) {
++            CUDA_CHECK(cudaStreamSynchronize(stream));
++            CUDA_CHECK(cudaFree(a.ptr));
++            a.ptr = nullptr; a.size = 0;
++        }
++        size_t sz = std::max(need, want);
++        if (cudaMalloc((void **) &a.ptr, sz) != cudaSuccess) {
++            (void) cudaGetLastError();
++            sz = need + need / 4; // the whole cache does not fit: this call with 25% headroom
++            if (cudaMalloc((void **) &a.ptr, sz) != cudaSuccess) {
++                (void) cudaGetLastError();
++                a.ptr = nullptr;
++                return nullptr;
++            }
++        }
++        a.size = sz;
++    }
++    return a.ptr;
++}
++
++size_t lf_fa_align(const size_t n) { return (n + 255) / 256 * 256; }
++
++template <int D>
++void lf_fa_run(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * Q = dst->src[0], * K = dst->src[1], * V = dst->src[2], * mask = dst->src[3];
++    const bool derived = dst->src[6] != nullptr;   // the derived form: src[6] cell positions, src[7] / src[8] the window (src[5]: kv_rows)
++    cudaStream_t stream = ctx.stream();
++    ggml_cuda_pool & pool = ctx.pool();
++    const int n_q = (int) Q->ne[1], HQ = (int) Q->ne[2], n_kv = (int) K->ne[1], HKV = (int) K->ne[2], G = HQ / HKV;
++    const int n_q_pad  = (n_q + LF_QB - 1) / LF_QB * LF_QB;
++    const int n_kv_pad = (n_kv + LF_KT - 1) / LF_KT * LF_KT;
++    float scale;
++    memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
++
++    // split the keys: about one split per 80 tiles at 128 query blocks (measured on gfx1201, head 256: 8K -> 2,
++    // 32K -> 6, 90K -> 8 at ubatch 512), fewer when the query grid alone is larger; at least 2 tiles per split
++    const int base = (n_q_pad / LF_QB) * HKV, ntile = n_kv_pad / LF_KT;
++    int nsplit = std::max(1, std::min({LF_MAXSPLIT, (int) (((int64_t) ntile * 128 + (int64_t) 40 * base) / ((int64_t) 80 * base)), ntile / 2}));
++
++    // operands of this call, carved from the per-stream scratch (sizes in elements); the same layout for the whole KV
++    // cache (n_kv_cap keys, the most splits) gives the size reserved on first use
++    const int64_t n_kv_cap = std::max<int64_t>(n_kv_pad, K->view_src ? (K->view_src->ne[1] + LF_KT - 1) / LF_KT * LF_KT : 0);
++    auto layout_bytes = [&](const int64_t nkv, const int ns, size_t * out) {
++        const size_t sz[] = { (size_t) HKV * nkv * D, (size_t) HKV * nkv * D, (size_t) n_q_pad * HQ * D, HKV * sizeof(float),
++                              (size_t) HKV * D * sizeof(float), (size_t) n_q_pad * HQ * sizeof(float),
++                              (size_t) HKV * (D / 32) * sizeof(unsigned int), (size_t) HKV * (D / 32) * sizeof(unsigned int),
++                              (size_t) ns * n_q_pad * HQ * D * sizeof(half), (size_t) ns * n_q_pad * HQ * sizeof(float2),
++                              (derived ? (size_t) nkv / LF_KT : 1) * sizeof(int2), sizeof(int2) };
++        size_t t = 0;
++        for (int i = 0; i < 12; ++i) { if (out) out[i] = sz[i]; t += lf_fa_align(sz[i]); }
++        return t;
++    };
++    const size_t want = layout_bytes(n_kv_cap, LF_MAXSPLIT, nullptr);
++    size_t sizes[12];
++    const size_t total = layout_bytes(n_kv_pad, nsplit, sizes);
++    char * scratch = lf_fa_arena_get(stream, total, want);
++    ggml_cuda_pool_alloc<char> fallback(pool);
++    if (scratch == nullptr) scratch = fallback.alloc(total);
++    char * cur = scratch;
++    auto carve = [&](const size_t b) { char * r = cur; cur += lf_fa_align(b); return r; };
++    uint8_t      * k8    = (uint8_t *)      carve(sizes[0]);
++    uint8_t      * v8t   = (uint8_t *)      carve(sizes[1]);
++    uint8_t      * q8    = (uint8_t *)      carve(sizes[2]);
++    float        * ks    = (float *)        carve(sizes[3]);
++    float        * vs    = (float *)        carve(sizes[4]);
++    float        * qs    = (float *)        carve(sizes[5]);
++    unsigned int * vbits = (unsigned int *) carve(sizes[6]);
++    unsigned int * kbits = (unsigned int *) carve(sizes[7]);
++    half         * part  = (half *)         carve(sizes[8]);
++    float2       * ml    = (float2 *)       carve(sizes[9]);
++    int2         * trange = (int2 *)        carve(sizes[10]);
++    int2         * vrange = (int2 *)        carve(sizes[11]);
++
++    // the cells this batch sees (for the amax passes): derived mask (one sequence) -> range of positions; f16 mask -> every
++    // cell.  The f16 mask is also the form of a ubatch with several sequences, where the last query's row is one sequence's
++    // view only: the other sequences' cells were converted as zeros.  Every cell (all of them finite) keeps each query's own
++    // cells; its own mask row still decides what it attends to.
++    const int   * cell_pos = derived ? (const int *) dst->src[6]->data : nullptr;
++    const int   * tok_lo   = derived ? (const int *) dst->src[7]->data : nullptr;
++    const int   * tok_hi   = derived ? (const int *) dst->src[8]->data : nullptr;
++    const char  * mdata    = !derived && mask ? (const char *) mask->data : nullptr;
++    const int64_t nb31     = !derived && mask ? mask->nb[1] : 0;
++    const half  * mlast    = nullptr;
++    if (derived) lf_fa_vis_range<<<1, 256, 0, stream>>>(tok_lo, tok_hi, n_q, vrange);
++
++    // the K / V conversions for q8_0 or q8_0r (head 256 only); the same values, so the same fp8 operands
++    auto conv_kv = [&](auto r) {
++        constexpr bool R = decltype(r)::value;
++        if constexpr (R) {
++            static const bool conv8 = getenv("FRANK_FA_FP8_CONV") == nullptr || atoi(getenv("FRANK_FA_FP8_CONV")) != 0;
++            static const bool check = getenv("FRANK_FA_FP8_CONV_CHECK") != nullptr && atoi(getenv("FRANK_FA_FP8_CONV_CHECK")) != 0;
++            if (conv8) {
++                constexpr int NG = D / 32;
++                CUDA_CHECK(cudaMemsetAsync(kbits, 0, (size_t) HKV * NG * sizeof(unsigned int), stream));
++                CUDA_CHECK(cudaMemsetAsync(vbits, 0, (size_t) HKV * NG * sizeof(unsigned int), stream));
++                lf_fa_conv_kv_amax<D, true><<<dim3(HKV, (n_kv + 127) / 128, 2), 256, 0, stream>>>((const char *) K->data, K->nb[1], K->nb[2],
++                    (const char *) V->data, V->nb[1], V->nb[2], n_kv, cell_pos, vrange, mlast, kbits, vbits);
++                lf_fa_conv_k<D, true><<<dim3((n_kv_pad + 7) / 8, HKV), 256, 0, stream>>>((const char *) K->data, K->nb[1], K->nb[2], n_kv, n_kv_pad, cell_pos, vrange, mlast, kbits, k8, ks);
++                lf_fa_conv_v_scale<D><<<HKV, D, 0, stream>>>(vbits, vs);
++                lf_fa_conv_v8<D><<<dim3(n_kv_pad / 64, HKV), D, 0, stream>>>((const char *) V->data, V->nb[1], V->nb[2], n_kv, n_kv_pad, cell_pos, vrange, mlast, vs, v8t);
++                if (check) {
++                    const int64_t nv = (int64_t) HKV * D * n_kv_pad;
++                    ggml_cuda_pool_alloc<unsigned int> kb(pool, (size_t) 2 * HKV * NG);
++                    ggml_cuda_pool_alloc<uint8_t> vt(pool, (size_t) nv);
++                    CUDA_CHECK(cudaMemsetAsync(kb.get(), 0, (size_t) 2 * HKV * NG * sizeof(unsigned int), stream));
++                    lf_fa_conv_v_amax<D, true><<<dim3(HKV, (n_kv + 255) / 256), 256, 0, stream>>>((const char *) K->data, K->nb[1], K->nb[2], n_kv, cell_pos, vrange, mlast, kb.get());
++                    lf_fa_conv_v_amax<D, true><<<dim3(HKV, (n_kv + 255) / 256), 256, 0, stream>>>((const char *) V->data, V->nb[1], V->nb[2], n_kv, cell_pos, vrange, mlast, kb.get() + HKV * NG);
++                    lf_fa_conv_v<D, true><<<dim3(n_kv_pad / 64, HKV), D, 0, stream>>>((const char *) V->data, V->nb[1], V->nb[2], n_kv, n_kv_pad, cell_pos, vrange, mlast, vs, vt.get());
++                    lf_fa_conv_cmp<<<(HKV * NG + 255) / 256, 256, 0, stream>>>(kbits, kb.get(), HKV * NG, 0);
++                    lf_fa_conv_cmp<<<(HKV * NG + 255) / 256, 256, 0, stream>>>(vbits, kb.get() + HKV * NG, HKV * NG, 1);
++                    lf_fa_conv_cmp<<<(unsigned) ((nv / 4 + 255) / 256), 256, 0, stream>>>((const uint32_t *) v8t, (const uint32_t *) vt.get(), nv / 4, 2);
++                }
++                return;
++            }
++        }
++        CUDA_CHECK(cudaMemsetAsync(kbits, 0, (size_t) HKV * (D / 32) * sizeof(unsigned int), stream));
++        lf_fa_conv_v_amax<D, R><<<dim3(HKV, (n_kv + 255) / 256), 256, 0, stream>>>((const char *) K->data, K->nb[1], K->nb[2], n_kv, cell_pos, vrange, mlast, kbits);
++        lf_fa_conv_k<D, R><<<dim3((n_kv_pad + 7) / 8, HKV), 256, 0, stream>>>((const char *) K->data, K->nb[1], K->nb[2], n_kv, n_kv_pad, cell_pos, vrange, mlast, kbits, k8, ks);
++        CUDA_CHECK(cudaMemsetAsync(vbits, 0, (size_t) HKV * (D / 32) * sizeof(unsigned int), stream));
++        lf_fa_conv_v_amax<D, R><<<dim3(HKV, (n_kv + 255) / 256), 256, 0, stream>>>((const char *) V->data, V->nb[1], V->nb[2], n_kv, cell_pos, vrange, mlast, vbits);
++        lf_fa_conv_v_scale<D><<<HKV, D, 0, stream>>>(vbits, vs);
++        lf_fa_conv_v<D, R><<<dim3(n_kv_pad / 64, HKV), D, 0, stream>>>((const char *) V->data, V->nb[1], V->nb[2], n_kv, n_kv_pad, cell_pos, vrange, mlast, vs, v8t);
++    };
++    if constexpr (D == 256) {
++        if (K->type == GGML_TYPE_Q8_0R) {
++            conv_kv(std::true_type{});
++        } else {
++            conv_kv(std::false_type{});
++        }
++    } else {
++        conv_kv(std::false_type{});
++    }
++    lf_fa_conv_q<D><<<dim3(n_q_pad / 8, HQ), 256, 0, stream>>>((const char *) Q->data, Q->nb[1], Q->nb[2], n_q, n_q_pad, HQ, q8, qs);
++
++    const float scale_log2 = scale * 1.4426950408889634f;
++    if (derived) lf_fa_tile_range<<<ntile, LF_KT, 0, stream>>>(cell_pos, n_kv, trange);
++    // TQB token groups a block (BigOne 6c, head 256): FRANK_FA_FP8_QB = 1, 2 or 4 (default 4); the same splits
++    static const int qb = [] { const char * e = getenv("FRANK_FA_FP8_QB"); const int v = e ? atoi(e) : 4; return v == 2 || v == 4 ? v : 1; }();
++    static const bool acheck = getenv("FRANK_FA_FP8_ATTN_CHECK") != nullptr && atoi(getenv("FRANK_FA_FP8_ATTN_CHECK")) != 0;
++    auto launch = [&](auto tqb, half * part_, float2 * ml_) {
++        constexpr int TB = decltype(tqb)::value;
++        const dim3 grid((n_q_pad / LF_QB + TB - 1) / TB, HKV, nsplit);
++#define LF_FA_LAUNCH(g) lf_fa_attn<g, D, TB><<<grid, TB * (g) * 32, 0, stream>>>(q8, qs, k8, ks, v8t, vs, \
++        cell_pos, tok_lo, tok_hi, trange, mdata, nb31, part_, ml_, n_q, n_q_pad, n_kv, n_kv_pad, scale_log2)
++        switch (G) {
++            case 1: LF_FA_LAUNCH(1); break;
++            case 2: LF_FA_LAUNCH(2); break;
++            case 3: LF_FA_LAUNCH(3); break;
++            case 4: LF_FA_LAUNCH(4); break;
++            case 5: LF_FA_LAUNCH(5); break;
++            case 6: LF_FA_LAUNCH(6); break;
++            case 7: LF_FA_LAUNCH(7); break;
++            case 8: LF_FA_LAUNCH(8); break;
++            default: GGML_ABORT("lf_fa_fp8: unsupported GQA ratio %d", G);
++        }
++#undef LF_FA_LAUNCH
++    };
++    int tqb = 1;
++    if constexpr (D == 256) {
++        tqb = qb;
++        if (tqb == 4) {
++            launch(std::integral_constant<int, 4>{}, part, ml);
++        } else if (tqb == 2) {
++            launch(std::integral_constant<int, 2>{}, part, ml);
++        }
++    }
++    if (tqb == 1) {
++        launch(std::integral_constant<int, 1>{}, part, ml);
++    } else if (acheck) {
++        // testing only: the one-group blocks into scratch, every written partial compared bit for bit
++        ggml_cuda_pool_alloc<half>   p1(pool, (size_t) nsplit * n_q_pad * HQ * D);
++        ggml_cuda_pool_alloc<float2> m1(pool, (size_t) nsplit * n_q_pad * HQ);
++        launch(std::integral_constant<int, 1>{}, p1.get(), m1.get());
++        lf_fa_attn_cmp<D><<<dim3(n_q * HQ, nsplit), D, 0, stream>>>(part, p1.get(), ml, m1.get(), n_q_pad, HQ);
++    }
++    // dst is [D, HQ, n_q] contiguous: rows t*HQ + h
++    static const bool combine4 = getenv("FRANK_FA_FP8_COMBINE4") == nullptr || atoi(getenv("FRANK_FA_FP8_COMBINE4")) != 0;
++    static const bool ccheck = getenv("FRANK_FA_FP8_COMBINE_CHECK") != nullptr && atoi(getenv("FRANK_FA_FP8_COMBINE_CHECK")) != 0;
++    if (combine4) {
++        lf_fa_combine4<D><<<(n_q * HQ + 3) / 4, D, 0, stream>>>(part, ml, (float *) dst->data, n_q_pad, HQ, nsplit, n_q * HQ);
++        if (ccheck) {
++            const int64_t n = (int64_t) n_q * HQ * D;
++            ggml_cuda_pool_alloc<float> o1(pool, n);
++            lf_fa_combine<D><<<n_q * HQ, D, 0, stream>>>(part, ml, o1.get(), n_q_pad, HQ, nsplit);
++            lf_fa_combine_cmp<<<(n + 255) / 256, 256, 0, stream>>>((const float *) dst->data, o1.get(), n);
++        }
++    } else {
++        lf_fa_combine<D><<<n_q * HQ, D, 0, stream>>>(part, ml, (float *) dst->data, n_q_pad, HQ, nsplit);
++    }
++    CUDA_CHECK(cudaGetLastError());
++}
++
++} // namespace
++
++bool ggml_cuda_lf_fa_fp8_supported(ggml_backend_cuda_context & ctx, const ggml_tensor * dst) {
++    if (!lf_on()) return false;
++    const ggml_tensor * Q = dst->src[0], * K = dst->src[1], * V = dst->src[2], * mask = dst->src[3];
++    if (!GGML_CUDA_CC_IS_RDNA4(ggml_cuda_info().devices[ctx.device].cc)) return false;
++    const bool q8r = K->type == GGML_TYPE_Q8_0R && V->type == GGML_TYPE_Q8_0R;   // BigOne's q8_0r cache (head 256)
++    if (Q->type != GGML_TYPE_F32 || !((K->type == GGML_TYPE_Q8_0 && V->type == GGML_TYPE_Q8_0) || q8r) || dst->type != GGML_TYPE_F32) return false;
++    const int64_t D = K->ne[0];
++    if (q8r && D != 256) return false;
++    if ((D != 64 && D != 128 && D != 256) || Q->ne[0] != D || V->ne[0] != D) return false;
++    if (Q->ne[3] != 1 || K->ne[3] != 1 || V->ne[3] != 1 || K->ne[1] != V->ne[1] || K->ne[2] != V->ne[2]) return false;
++    if (K->ne[1] < lf_min_kv()) return false;
++    if (Q->ne[1] < lf_min_t() || Q->nb[0] != sizeof(float) || Q->nb[1] % 16 != 0 || Q->nb[2] % 16 != 0) return false;
++    if ((uintptr_t) Q->data % 16 != 0) return false;
++    const int64_t HQ = Q->ne[2], HKV = K->ne[2];
++    if (HKV <= 0 || HQ % HKV != 0) return false;
++    const int64_t G = HQ / HKV;
++    if (G < 1 || G > 8) return false;
++    if (D == 256 && G == 1) return false;   // 32-thread blocks at head 256 spill registers
++    if (V->view_src && (V->view_src == K || (V->view_src == K->view_src && V->view_offs == K->view_offs))) return false;
++    if (dst->src[4] != nullptr) return false; // sinks
++    float max_bias, softcap;
++    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
++    memcpy(&softcap,  (const float *) dst->op_params + 2, sizeof(float));
++    if (max_bias != 0.f || softcap != 0.f) return false;
++    const bool derived = dst->src[6] != nullptr;   // the derived form: src[6] cell positions, src[7] / src[8] the window (src[5]: kv_rows)
++    if (!derived && mask && (mask->type != GGML_TYPE_F16 || mask->ne[2] != 1 || mask->ne[3] != 1 || mask->ne[0] < K->ne[1])) return false;
++    if (!ggml_is_contiguous(dst)) return false;
++    return true;
++}
++
++void ggml_cuda_lf_fa_fp8(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    switch (dst->src[1]->ne[0]) {
++        case  64: lf_fa_run< 64>(ctx, dst); break;
++        case 128: lf_fa_run<128>(ctx, dst); break;
++        case 256: lf_fa_run<256>(ctx, dst); break;
++        default: GGML_ABORT("lf_fa_fp8: unsupported head size %lld", (long long) dst->src[1]->ne[0]);
++    }
++}
+diff --git a/ggml/src/ggml-cuda/lf-fa-fp8.cuh b/ggml/src/ggml-cuda/lf-fa-fp8.cuh
+new file mode 100644
+index 000000000..8f6662435
+--- /dev/null
++++ b/ggml/src/ggml-cuda/lf-fa-fp8.cuh
+@@ -0,0 +1,12 @@
++#pragma once
++#include "common.cuh"
++// F8: FP8 flash attention for RDNA4 prefill.
++// On by default (FRANK_FA_FP8=0 turns it off; unset with FRANK_ALL=0: off); FRANK_FA_FP8_MIN_T (default 32) is the smallest
++// token count it takes, so decode / speculative verify keep their kernels; FRANK_FA_FP8_MIN_KV (default 512) the
++// smallest KV length.
++// Head 64 / 128 / 256, GQA 1..8.  The q8_0 K/V cache stays as it is; each call converts it to fp8 e4m3 (K: one scale per token and head, V: transposed,
++// one scale per channel) the way the f16 path converts it to f16, Q gets one scale per token and head, and
++// S^T = K Q^T and O^T += V^T P^T run on v_wmma_f32_16x16x16_fp8_fp8 (P scaled by 2^8).  Results differ from the
++// f16 path (fp8 rounding of Q, K, V and P).
++bool ggml_cuda_lf_fa_fp8_supported(ggml_backend_cuda_context & ctx, const ggml_tensor * dst);
++void ggml_cuda_lf_fa_fp8(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/rope.cu b/ggml/src/ggml-cuda/rope.cu
+index ceb222703..917e576c5 100644
+--- a/ggml/src/ggml-cuda/rope.cu
++++ b/ggml/src/ggml-cuda/rope.cu
+@@ -783,27 +783,30 @@ void ggml_cuda_op_rope_fused(ggml_backend_cuda_context & ctx, ggml_tensor * rope
+ }
+ 
+ // the K/V cache write of one 32-element group (lane = element) in the cache's quantizer, i.e. the kv template value
+-// (1 = q8_0, 2 = q4_0, 3 = q5_0, 4 = iq4_nl).  Only a QUANTIZED cache reaches these kernels at all: the Hadamard
++// (1 = q8_0, 2 = q4_0, 3 = q5_0, 4 = iq4_nl, 5 = q8_0r).  Only a QUANTIZED cache reaches these kernels at all: the Hadamard
+ // attention rotation the fold replaces exists only when ggml_is_quantized(type_k/type_v) (llama-kv-cache's
+ // attn_rot_k/attn_rot_v), so an f16 / bf16 / f32 cache has no rotation to fold and keeps its own set_rows launch.
+ template <int kv>
+ static __device__ __forceinline__ void rope_kv_quantize_group(const float v, void * row, const int col) {
+-    static_assert(kv >= 1 && kv <= 4, "unknown KV-cache write type");
++    static_assert(kv >= 1 && kv <= 5, "unknown KV-cache write type");
+     if constexpr (kv == 1) {
+         ggml_cuda_quantize_q8_0_group(v, (block_q8_0 *) row + col/QK8_0, col % QK8_0);
+     } else if constexpr (kv == 2) {
+         ggml_cuda_quantize_q4_0_group(v, (block_q4_0 *) row + col/QK4_0, col % QK4_0);
+     } else if constexpr (kv == 3) {
+         ggml_cuda_quantize_q5_0_group(v, (block_q5_0 *) row + col/QK5_0, col % QK5_0);
+-    } else {
++    } else if constexpr (kv == 4) {
+         ggml_cuda_quantize_iq4_nl_group(v, (block_iq4_nl *) row + col/QK4_NL, col % QK4_NL);
++    } else {
++        // q8_0r (BigOne's KV row: 256 codes, then the 8 group scales)
++        ggml_cuda_quantize_q8_0r_group(v, (block_q8_0r *) row + col/QK8_0R, col % QK8_0R);
+     }
+ }
+ 
+ // KV-cache writes folded into the fwht_n kernel: SET_ROWS (q8_0) of the rotated K row and, optionally, of the V row
+ // (already rotated, F32), for one token per channel
+ struct rope_kv_cache {
+-    // the cache's quantizer, i.e. the kernels' kv template value: 1 = q8_0, 2 = q4_0, 3 = q5_0, 4 = iq4_nl.
++    // the cache's quantizer, i.e. the kernels' kv template value: 1 = q8_0, 2 = q4_0, 3 = q5_0, 4 = iq4_nl, 5 = q8_0r.
+     // Host-side only: the kernel gets it as a template value.
+     int             k_type;
+     void          * k_dst;    // K cache view; the rotated row goes here instead of dst
+@@ -824,6 +827,7 @@ struct rope_kv_cache {
+     int64_t         vp_nb1;   // bytes per V cache row
+ };
+ 
++// one value of a K / V cache row (col: its position in the row; the 32 lanes of a group hold one group's values in order)
+ // fused RMS_NORM + MUL + ROPE (+ VIEW + SET_ROWS)
+ // one block per row: block_reduce gives the norm scale, then each thread applies mul and rope to the elements it owns
+ // fwht_n > 0 (ncols == fwht_n): the KV rotation's Hadamard MUL_MAT follows; the roped row goes through shared
+@@ -1166,6 +1170,7 @@ static void rms_norm_mul_rope_cuda(
+                         case 2: RMR_FWHT_LAUNCH(true, 2); break;   // q4_0
+                         case 3: RMR_FWHT_LAUNCH(true, 3); break;   // q5_0
+                         case 4: RMR_FWHT_LAUNCH(true, 4); break;   // iq4_nl
++                        case 5: RMR_FWHT_LAUNCH(true, 5); break;   // q8_0r
+                         default: GGML_ABORT("fatal error");
+                     }
+                 }
+@@ -1179,6 +1184,7 @@ static void rms_norm_mul_rope_cuda(
+                     case 2: RMR_FWHT_LAUNCH(false, 2); break;   // q4_0
+                     case 3: RMR_FWHT_LAUNCH(false, 3); break;   // q5_0
+                     case 4: RMR_FWHT_LAUNCH(false, 4); break;   // iq4_nl
++                    case 5: RMR_FWHT_LAUNCH(false, 5); break;   // q8_0r
+                     default: GGML_ABORT("fatal error");
+                 }
+             }
+@@ -1265,18 +1271,21 @@ void ggml_cuda_op_rms_norm_mul_rope_fused(ggml_backend_cuda_context & ctx,
+         // the cache's quantized SET_ROWS of the rotated K row (and of the V row) instead of the F32 rotation output;
+         // the matcher checked the shapes (one contiguous [nrows*ncols] row per token, I64 indices) and the cache type
+         GGML_ASSERT(fwht != nullptr && (k_set_rows->type == GGML_TYPE_Q8_0 || k_set_rows->type == GGML_TYPE_Q4_0 ||
+-                                        k_set_rows->type == GGML_TYPE_Q5_0 || k_set_rows->type == GGML_TYPE_IQ4_NL));
++                                        k_set_rows->type == GGML_TYPE_Q5_0 || k_set_rows->type == GGML_TYPE_IQ4_NL ||
++                                        k_set_rows->type == GGML_TYPE_Q8_0R));
+         // q4_0 / q5_0 / iq4_nl group quantizers are one 32-lane wave, so they are wave32 only (the matcher gates the
+         // types on it as well); q8_0's shuffle width does not care
+-        GGML_ASSERT(ggml_cuda_info().devices[ctx.device].warp_size == 32 || k_set_rows->type == GGML_TYPE_Q8_0);
++        GGML_ASSERT(ggml_cuda_info().devices[ctx.device].warp_size == 32 || k_set_rows->type == GGML_TYPE_Q8_0 ||
++                    k_set_rows->type == GGML_TYPE_Q8_0R);
+         kv.k_type = k_set_rows->type == GGML_TYPE_Q8_0 ? 1 : k_set_rows->type == GGML_TYPE_Q4_0 ? 2 :
+-                    k_set_rows->type == GGML_TYPE_Q5_0 ? 3 : 4;
++                    k_set_rows->type == GGML_TYPE_Q5_0 ? 3 : k_set_rows->type == GGML_TYPE_IQ4_NL ? 4 : 5;
+         kv.k_dst  = k_set_rows->data;
+         kv.k_idx  = (const int64_t *) k_set_rows->src[1]->data;
+         kv.k_nb1  = k_set_rows->nb[1];
+         if (v_set_rows != nullptr) {
+             GGML_ASSERT((v_set_rows->type == GGML_TYPE_Q8_0 || v_set_rows->type == GGML_TYPE_Q4_0 ||
+-                         v_set_rows->type == GGML_TYPE_Q5_0 || v_set_rows->type == GGML_TYPE_IQ4_NL) &&
++                         v_set_rows->type == GGML_TYPE_Q5_0 || v_set_rows->type == GGML_TYPE_IQ4_NL ||
++                         v_set_rows->type == GGML_TYPE_Q8_0R) &&
+                         v_set_rows->src[0]->type == GGML_TYPE_F32);
+             GGML_ASSERT(v_set_rows->type == k_set_rows->type);   // the matchers fold V only into a K write of its type
+             kv.v_src = (const float *) v_set_rows->src[0]->data;
+@@ -1401,7 +1410,7 @@ void ggml_cuda_op_rms_norm_mul_rope_qk_pair_fwht(ggml_backend_cuda_context & ctx
+     const auto launch = [&](auto kernel) {
+         ggml_cuda_kernel_launch(kernel, launch_params, q, k);
+     };
+-    // the K cache's quantizer is a template value: 1 = q8_0, 2 = q4_0, 3 = q5_0, 4 = iq4_nl
++    // the K cache's quantizer is a template value: 1 = q8_0, 2 = q4_0, 3 = q5_0, 4 = iq4_nl, 5 = q8_0r
+ #define RMR_PAIR_LAUNCH(KV)                                                                                          \
+     switch (q.fwht_n) {                                                                                             \
+         case  64: has_ff ? launch(rms_norm_mul_rope_f32_qk_pair<true,  float, float,  64, KV>)                       \
+@@ -1417,6 +1426,7 @@ void ggml_cuda_op_rms_norm_mul_rope_qk_pair_fwht(ggml_backend_cuda_context & ctx
+         case 2: RMR_PAIR_LAUNCH(2); break;   // q4_0
+         case 3: RMR_PAIR_LAUNCH(3); break;   // q5_0
+         case 4: RMR_PAIR_LAUNCH(4); break;   // iq4_nl
++        case 5: RMR_PAIR_LAUNCH(5); break;   // q8_0r
+         default: GGML_ABORT("fatal error");
+     }
+ #undef RMR_PAIR_LAUNCH
+diff --git a/ggml/src/ggml-cuda/set-rows.cu b/ggml/src/ggml-cuda/set-rows.cu
+index 0ee78aed5..db243ca36 100644
+--- a/ggml/src/ggml-cuda/set-rows.cu
++++ b/ggml/src/ggml-cuda/set-rows.cu
+@@ -75,10 +75,10 @@ static __global__ void k_set_rows_quant(const float * __restrict__ src0,
+ // q8_0: one 32-lane group per block instead of one thread.  The KV cache write is a single short row per token, so
+ // one thread looping over 32 elements (and 32 byte stores) was the latency of the whole launch.  amax is an exact max
+ // and every element takes the same d and roundf as quantize_f32_q8_0_block, so the bytes written are identical.
+-template <typename idx_t>
++template <typename idx_t, typename block_type>
+ static __global__ void k_set_rows_q8_0_group(const float * __restrict__ src0,
+                                              const idx_t * __restrict__ src1,
+-                                             block_q8_0 * __restrict__ dst,
++                                             block_type * __restrict__ dst,
+                                              const int64_t ne_total,
+                                              const int64_t s01,
+                                              const int64_t s02,
+@@ -125,9 +125,14 @@ static __global__ void k_set_rows_q8_0_group(const float * __restrict__ src0,
+     const int64_t dst_row = *(src1 + i10*s10 + i11*s11 + i12*s12);
+ 
+     const float * src_block = src0 + i01*s01 + i02*s02 + i03*s03 + i00;
+-    block_q8_0  * dst_block = dst + (dst_row*s1 + i02*s2 + i03*s3) / sizeof(block_q8_0) + i00 / QK8_0;
++    char        * dst_row_p = (char *) dst + dst_row*s1 + i02*s2 + i03*s3;
+ 
+-    ggml_cuda_quantize_q8_0_group(src_block[lane], dst_block, lane);
++    if constexpr (std::is_same_v<block_type, block_q8_0r>) {
++        // q8_0r: the group is one eighth of a 256-value block
++        ggml_cuda_quantize_q8_0r_group(src_block[lane], (block_q8_0r *) dst_row_p + i00 / QK8_0R, i00 % QK8_0R + lane);
++    } else {
++        ggml_cuda_quantize_q8_0_group(src_block[lane], (block_q8_0 *) dst_row_p + i00 / QK8_0, lane);
++    }
+ }
+ 
+ // Template dispatch function for quantized set_rows
+@@ -164,10 +169,12 @@ static void set_rows_cuda_quant(
+         const uint3 ne11_fd = init_fastdiv_values((uint32_t) ne11);
+         const uint3 ne12_fd = init_fastdiv_values((uint32_t) ne12);
+ 
+-        if constexpr (std::is_same_v<block_type, block_q8_0>) {
++        if constexpr (std::is_same_v<block_type, block_q8_0> || std::is_same_v<block_type, block_q8_0r>) {
++            // one 32-lane group per 32 values (a q8_0 block, an eighth of a q8_0r block)
+             constexpr int groups = CUDA_SET_ROWS_BLOCK_SIZE / QK8_0;
+-            k_set_rows_q8_0_group<idx_t><<<(ne_total + groups - 1) / groups, block_size, 0, stream>>>(
+-                src0_d, src1_d, dst_d, ne_total, s01, s02, s03, s10, s11, s12, s1, s2, s3, ne00_fd,
++            const int64_t ne_groups = ne_total * (qk / QK8_0);
++            k_set_rows_q8_0_group<idx_t, block_type><<<(ne_groups + groups - 1) / groups, block_size, 0, stream>>>(
++                src0_d, src1_d, dst_d, ne_groups, s01, s02, s03, s10, s11, s12, s1, s2, s3, ne00_fd,
+                 ne01_fd, ne02_fd, ne11_fd, ne12_fd);
+         } else {
+             k_set_rows_quant<idx_t, block_type, qk, quantize_func><<<grid_size, block_size, 0, stream>>>(
+@@ -374,6 +381,16 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
+             nb1, nb2, nb3,
+             stream
+         );
++    } else if (dst->type == GGML_TYPE_Q8_0R) {
++        set_rows_cuda_quant<idx_t, block_q8_0r, QK8_0R, quantize_f32_q8_0r_block>(
++            src0_d, src1_d, (block_q8_0r*)dst->data,
++            ne00, ne01, ne02, ne03,
++            ne10, ne11, ne12, ne13,
++            nb01, nb02, nb03,
++            nb10, nb11, nb12,
++            nb1, nb2, nb3,
++            stream
++        );
+     } else if (dst->type == GGML_TYPE_IQ4_NL) {
+         set_rows_cuda_quant<idx_t, block_iq4_nl, QK4_NL, quantize_f32_iq4_nl_block>(
+             src0_d, src1_d, (block_iq4_nl*)dst->data,
+diff --git a/ggml/src/ggml-cuda/set-rows.cuh b/ggml/src/ggml-cuda/set-rows.cuh
+index 3dabf7f1c..22207869d 100644
+--- a/ggml/src/ggml-cuda/set-rows.cuh
++++ b/ggml/src/ggml-cuda/set-rows.cuh
+@@ -136,4 +136,22 @@ static __device__ __forceinline__ void ggml_cuda_quantize_iq4_nl_group(const flo
+     }
+ }
+ 
++// The same for a 32-value group of a q8_0r block (BigOne's KV row: 256 codes, then the 8 group scales); i = position in
++// the block, the 32 lanes of the group hold i of one group in order.  Bytes identical to quantize_f32_q8_0r_block.
++static __device__ __forceinline__ void ggml_cuda_quantize_q8_0r_group(const float v, block_q8_0r * blk, const int i) {
++    float amax = fmaxf(0.0f, fabsf(v));
++#pragma unroll
++    for (int offset = QK8_0/2; offset > 0; offset >>= 1) {
++        amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, offset, QK8_0));
++    }
++
++    const float d  = amax / ((1 << 7) - 1);
++    const float id = d ? 1.0f/d : 0.0f;
++
++    if (i % QK8_0 == 0) {
++        blk->d[i / QK8_0] = d;
++    }
++    blk->qs[i] = roundf(v*id);
++}
++
+ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+diff --git a/ggml/src/ggml-quants.c b/ggml/src/ggml-quants.c
+index 3586f67ae..bb8b1138f 100644
+--- a/ggml/src/ggml-quants.c
++++ b/ggml/src/ggml-quants.c
+@@ -295,6 +295,28 @@ void quantize_row_q8_0_ref(const float * GGML_RESTRICT x, block_q8_0 * GGML_REST
+     }
+ }
+ 
++// q8_0r: q8_0's rule (delta = amax / 127 per 32, codes from the f32 delta, the delta stored as f16), codes first
++void quantize_row_q8_0r_ref(const float * GGML_RESTRICT x, block_q8_0r * GGML_RESTRICT y, int64_t k) {
++    assert(k % QK8_0R == 0);
++    const int nb = k / QK8_0R;
++
++    for (int i = 0; i < nb; i++) {
++        for (int g = 0; g < QK8_0R / QK8_0; g++) {
++            const float * xg = x + i*QK8_0R + g*QK8_0;
++            float amax = 0.0f;
++            for (int j = 0; j < QK8_0; j++) {
++                amax = MAX(amax, fabsf(xg[j]));
++            }
++            const float d  = amax / ((1 << 7) - 1);
++            const float id = d ? 1.0f/d : 0.0f;
++            y[i].d[g] = GGML_FP32_TO_FP16(d);
++            for (int j = 0; j < QK8_0; ++j) {
++                y[i].qs[g*QK8_0 + j] = roundf(xg[j]*id);
++            }
++        }
++    }
++}
++
+ // reference implementation for deterministic creation of model files
+ void quantize_row_q8_1_ref(const float * GGML_RESTRICT x, block_q8_1 * GGML_RESTRICT y, int64_t k) {
+     assert(QK8_1 == 32);
+@@ -569,6 +591,17 @@ void dequantize_row_q8_0(const block_q8_0 * GGML_RESTRICT x, float * GGML_RESTRI
+     }
+ }
+ 
++void dequantize_row_q8_0r(const block_q8_0r * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
++    assert(k % QK8_0R == 0);
++    const int nb = k / QK8_0R;
++
++    for (int i = 0; i < nb; i++) {
++        for (int j = 0; j < QK8_0R; ++j) {
++            y[i*QK8_0R + j] = x[i].qs[j]*GGML_FP16_TO_FP32(x[i].d[j / QK8_0]);
++        }
++    }
++}
++
+ void dequantize_row_mxfp4(const block_mxfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+     static const int qk = QK_MXFP4;
+ 
+@@ -2309,6 +2342,12 @@ size_t quantize_q8_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+     return nrow * row_size;
+ }
+ 
++size_t quantize_q8_0r(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
++    (void)quant_weights; // not used
++    quantize_row_q8_0r_ref(src, dst, (int64_t)nrow*n_per_row);
++    return nrow * ggml_row_size(GGML_TYPE_Q8_0R, n_per_row);
++}
++
+ size_t quantize_mxfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+     GGML_UNUSED(quant_weights);
+     quantize_row_mxfp4_ref(src, dst, (int64_t)nrow*n_per_row);
+@@ -5545,6 +5584,17 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
+             {
+                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q8_0, data, nb);
+             } break;
++        case GGML_TYPE_Q8_0R:
++            {
++                const block_q8_0r * q = (const block_q8_0r *) data;
++                for (size_t i = 0; i < nb; ++i) {
++                    for (int g = 0; g < QK8_0R / QK8_0; ++g) {
++                        if (!validate_fp16(q[i].d[g], i)) {
++                            return false;
++                        }
++                    }
++                }
++            } break;
+         case GGML_TYPE_MXFP4:
+             {
+                 VALIDATE_ROW_DATA_E_E8M0_IMPL(block_mxfp4, data, nb);
+diff --git a/ggml/src/ggml-quants.h b/ggml/src/ggml-quants.h
+index ca36d1369..8bbb82006 100644
+--- a/ggml/src/ggml-quants.h
++++ b/ggml/src/ggml-quants.h
+@@ -21,6 +21,7 @@ GGML_API void quantize_row_q4_1_ref(const float * GGML_RESTRICT x, block_q4_1 *
+ GGML_API void quantize_row_q5_0_ref(const float * GGML_RESTRICT x, block_q5_0 * GGML_RESTRICT y, int64_t k);
+ GGML_API void quantize_row_q5_1_ref(const float * GGML_RESTRICT x, block_q5_1 * GGML_RESTRICT y, int64_t k);
+ GGML_API void quantize_row_q8_0_ref(const float * GGML_RESTRICT x, block_q8_0 * GGML_RESTRICT y, int64_t k);
++GGML_API void quantize_row_q8_0r_ref(const float * GGML_RESTRICT x, block_q8_0r * GGML_RESTRICT y, int64_t k);
+ GGML_API void quantize_row_q8_1_ref(const float * GGML_RESTRICT x, block_q8_1 * GGML_RESTRICT y, int64_t k);
+ 
+ GGML_API void quantize_row_mxfp4_ref(const float * GGML_RESTRICT x, block_mxfp4 * GGML_RESTRICT y, int64_t k);
+@@ -51,6 +52,7 @@ GGML_API void dequantize_row_q4_1(const block_q4_1 * GGML_RESTRICT x, float * GG
+ GGML_API void dequantize_row_q5_0(const block_q5_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+ GGML_API void dequantize_row_q5_1(const block_q5_1 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+ GGML_API void dequantize_row_q8_0(const block_q8_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
++GGML_API void dequantize_row_q8_0r(const block_q8_0r * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+ //GGML_API void dequantize_row_q8_1(const block_q8_1 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+ 
+ GGML_API void dequantize_row_mxfp4(const block_mxfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+@@ -103,6 +105,7 @@ GGML_API size_t quantize_q4_1(const float * GGML_RESTRICT src, void * GGML_RESTR
+ GGML_API size_t quantize_q5_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+ GGML_API size_t quantize_q5_1(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+ GGML_API size_t quantize_q8_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
++GGML_API size_t quantize_q8_0r(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+ 
+ GGML_API size_t quantize_mxfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+ GGML_API size_t quantize_nvfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index ba41f8cd0..60583fa96 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -749,6 +749,14 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
+         .to_float                 = (ggml_to_float_t) dequantize_row_q8_0,
+         .from_float_ref           = (ggml_from_float_t) quantize_row_q8_0_ref,
+     },
++    [GGML_TYPE_Q8_0R] = {
++        .type_name                = "q8_0r",
++        .blck_size                = QK8_0R,
++        .type_size                = sizeof(block_q8_0r),
++        .is_quantized             = true,
++        .to_float                 = (ggml_to_float_t) dequantize_row_q8_0r,
++        .from_float_ref           = (ggml_from_float_t) quantize_row_q8_0r_ref,
++    },
+     [GGML_TYPE_Q8_1] = {
+         .type_name                = "q8_1",
+         .blck_size                = QK8_1,
+@@ -8846,6 +8854,7 @@ size_t ggml_quantize_chunk(
+         case GGML_TYPE_Q5_0:    result = quantize_q5_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_Q5_1:    result = quantize_q5_1   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_Q8_0:    result = quantize_q8_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
++        case GGML_TYPE_Q8_0R:   result = quantize_q8_0r  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_MXFP4:   result = quantize_mxfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_NVFP4:   result = quantize_nvfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_F8_E4M3: result = quantize_f8_e4m3(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index f88bfbe3b..bb6f737a5 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -6259,7 +6259,8 @@ llama_context * llama_init_from_model(
+     }
+ 
+     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_k)) {
+-        const uint32_t blck_size = ggml_blck_size(params.type_k);
++        // q8_0r: a layer whose head dim is not a multiple of 256 keeps q8_0 (llama_kv_cache), so q8_0's block must divide it
++        const uint32_t blck_size = ggml_blck_size(params.type_k == GGML_TYPE_Q8_0R ? GGML_TYPE_Q8_0 : params.type_k);
+         for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
+             if (model->hparams.n_embd_head_k(il) % blck_size != 0) {
+                 LLAMA_LOG_ERROR("%s: K cache type %s with block size %u does not divide n_embd_head_k=%u\n",
+@@ -6270,7 +6271,8 @@ llama_context * llama_init_from_model(
+     }
+ 
+     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_v)) {
+-        const uint32_t blck_size = ggml_blck_size(params.type_v);
++        // q8_0r: a layer whose head dim is not a multiple of 256 keeps q8_0 (llama_kv_cache), so q8_0's block must divide it
++        const uint32_t blck_size = ggml_blck_size(params.type_v == GGML_TYPE_Q8_0R ? GGML_TYPE_Q8_0 : params.type_v);
+         for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
+             if (model->hparams.n_embd_head_v(il) % blck_size != 0) {
+                 LLAMA_LOG_ERROR("%s: V cache type %s with block size %u does not divide n_embd_head_v=%u\n",
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index aa660d06a..0d796d192 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -951,8 +951,18 @@ llama_kv_cache::llama_kv_cache(
+         const bool has_k = true;
+         const bool has_v = !is_mla && v_enabled;
+ 
+-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx_kv, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
+-        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx_kv, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
++        // q8_0r holds whole 256-value rows: a layer whose head dim is not a multiple of 256 keeps q8_0 (the same values)
++        auto row_type = [&](ggml_type t, uint32_t head_dim, const char * which) {
++            if (t == GGML_TYPE_Q8_0R && head_dim % 256 != 0) {
++                LLAMA_LOG_WARN("%s: layer %d: %s head dim %u is not a multiple of 256, q8_0 instead of q8_0r\n", __func__, il, which, head_dim);
++                return GGML_TYPE_Q8_0;
++            }
++            return t;
++        };
++        const ggml_type type_k_l = row_type(type_k, hparams.n_embd_head_k(il), "K");
++        const ggml_type type_v_l = row_type(type_v, hparams.n_embd_head_v(il), "V");
++        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx_kv, type_k_l, n_embd_k_gqa, kv_size, n_stream) : nullptr;
++        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx_kv, type_v_l, n_embd_v_gqa, kv_size, n_stream) : nullptr;
+ 
+         has_k && ggml_format_name(k, "cache_%sk_l%d", name_tag, il);
+         has_v && ggml_format_name(v, "cache_%sv_l%d", name_tag, il);
+@@ -976,8 +986,8 @@ llama_kv_cache::llama_kv_cache(
+         kv_pool_layer pl;
+         if (kv_pool_page != 0 && has_v) {
+             const int64_t pool_cells = (int64_t) kv_pool_page*kv_pool_n_pages;
+-            pl.pool_k = ggml_new_tensor_2d(ctx, type_k, n_embd_k_gqa, pool_cells);
+-            pl.pool_v = ggml_new_tensor_2d(ctx, type_v, n_embd_v_gqa, pool_cells);
++            pl.pool_k = ggml_new_tensor_2d(ctx, type_k_l, n_embd_k_gqa, pool_cells);
++            pl.pool_v = ggml_new_tensor_2d(ctx, type_v_l, n_embd_v_gqa, pool_cells);
+             pl.tbl    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, kv_pool_n_blocks);
+             pl.inv    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, kv_pool_n_pages);
+             pl.use    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, kv_pool_n_pages);
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 46f7905eb..a88dab863 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -11109,6 +11109,26 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_I64, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
+     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_I32, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
+     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_Q8_0, GGML_TYPE_I32, { 256, 5, 1, 3 }, { 1, 1, }, 1, false));
++    // q8_0r (BigOne's KV cache type, whole 256-value rows): its row ops and the flash attention over it (head 256, GQA 6)
++    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_Q8_0R, GGML_TYPE_I64, { 256, 5, 1, 3 }, { 1, 1, }, 1, false));
++    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_Q8_0R, GGML_TYPE_I64, { 256, 11, 1, 7 }, { 2, 3, }, 7, false));
++    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_Q8_0R, GGML_TYPE_I32, { 768, 3, 7, 1 }, { 2, 3, }, 2, true));
++    test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_Q8_0R, {256, 4, 4, 4}));
++    test_cases.emplace_back(new test_cpy(GGML_TYPE_Q8_0R, GGML_TYPE_F32, {256, 4, 4, 4}));
++    test_cases.emplace_back(new test_cpy(GGML_TYPE_Q8_0R, GGML_TYPE_F32, {256, 2, 3, 4}, {-1,-1,-1,-1}, {0, 2, 1, 3}));
++    test_cases.emplace_back(new test_get_rows(GGML_TYPE_Q8_0R, 256, 8, 2, 1, 1, false));
++    // 1..31 rows take the q8_0r decode / verify kernel (9..16 in two launches, 17..31 in launches of 8; 32 and more go to F8,
++    // whose fp8 error is above this test's bound for q8_0 as well); mask_hole: a 256-cell group masked for every row (the
++    // skip); GQA 4 leaves rows of the last tile unused
++    for (int kv : { 512, 1024, 1280, 1792, 2048, }) {
++        for (int nb : { 1, 2, 3, 5, 6, 8, 9, 13, 16, 20, 31, }) {
++            test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0R, GGML_TYPE_Q8_0R,
++                                                            {0, 1, 2, 3}, true, false, 0, false, false, kv == 2048));
++        }
++    }
++    for (int nb : { 1, 4, 8, }) {
++        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {4, 1}, 1024, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0R, GGML_TYPE_Q8_0R));
++    }
+     for (ggml_type src_type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
+         for (ggml_type type : all_types) {
+             for (int b : {1, 7}) {
+@@ -13276,6 +13296,21 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+         }
+     }
+ 
++    // The same shape at the 9..16-row verify widths, which the RDNA4 band runs as two halves of <= 8 rows
++    // (FRANK_FA_BAND_SPLIT): the packed mask, the packed mask with a fully masked interior block (another slot's
++    // cells, so the band skip engages inside each half), and the derived form a single-sequence batch of more than
++    // 8 tokens carries.
++    for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0}) {
++        for (int kv : { 512, 4096, 16384 }) {
++            for (int nb : { 9, 12, 16 }) {
++                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, type, type));
++                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, type, type, {0, 2, 1, 3}));
++                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, type, type, {0, 1, 2, 3}, true, false, 0, false, false, true));
++                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, false, false, 0, 0, GGML_PREC_F32, type, type, {0, 1, 2, 3}, true, false, 0, true, kv > 1280));
++            }
++        }
++    }
++
+     // q8_0 KV cases: decode and prompt batches, KV pad, permuted KV, feature flags, and long context
+     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},   113,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},  1024,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+@@ -13932,6 +13967,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+         }
+     }
+ 
++    // BigOne stage 4: qwen35's decode / verify attention over q8_0 (the band) and q8_0r (fattn-q8r.cu) at long
++    // contexts
++    for (ggml_type type : {GGML_TYPE_Q8_0, GGML_TYPE_Q8_0R}) {
++        for (int kv : {32768, 110592}) {
++            for (int nb : {1, 5, 6, 8}) {
++                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, type, type));
++            }
++        }
++    }
++
+     // Conv2d: K=CRS=NPQ=4096 matmul performance
+     uint32_t                        iwh_idx  = 0;
+     uint32_t                        kwh_idx  = 1;
