@@ -67,7 +67,6 @@ and their KLD: [STRUCTURE.md](STRUCTURE.md#lossy-parts).
 | `FRANK_STEP_LOOP_SEQ2`<br>(default on) | `1`, `0` | With the loop: two sequences are verified in one step. |
 | `FRANK_DEVICE_INPUT_MAPPED`<br>(default on) | `1`, `0` | With the loop: the token embedding stays in pinned host memory that the GPU reads in place, so its lookup runs in the GPU graph without a VRAM copy (0.66 GiB less VRAM on Qwen3.8-27B).  Same bytes. |
 | `FRANK_GRAPH_MAX_TOKENS`<br>(default `16`) | a number | The most tokens a host-path batch may have and still be captured as a HIP graph (the release: 8).  The same kernels; copying with an n-gram draft is about 3% faster per step. |
-| `FRANK_RS_WHOLE_BATCH`, `FRANK_STEP_AHEAD`<br>(opt-in, default off) | `1`, `0` | The loop issues the next step before the last one is committed, and drops it whole when the request stops; the recurrent memory then also allows a rollback of a whole batch.  Either variable set to `1` turns both on; `FRANK_STEP_AHEAD=1` with `FRANK_RS_WHOLE_BATCH=0` stays off (with a warning).  Off by default: one step at a time was as fast at 8K and 1.6% faster per step at 32K and 110K. |
 
 ### J7 state between requests
 

@@ -57,7 +57,7 @@ applied by its own script, then this repository's seven patches.  `llama-server`
 |---|---|---|
 | the llama.cpp checkout | `git rev-parse HEAD^{tree}` | `9d7b9a02f0864295926888b2ca0ea1f57e6d977d` (`release.json` field `base_tree`) |
 | `apply-all.sh` | `git rev-parse HEAD^{tree}` | `0104361a095f7463d52376a408b8a7863d83f2d7` (`release.json` field `tree`); the branch tip is commit `9d7c0502c9b023fc438044fd3ca2e7cfc47631f6` (field `tip`) |
-| the seven patches | `git add -A`, then `git write-tree` | `cbc8d50f488d287182caf92cb01f3c49a3fc3282` |
+| the seven patches | `git add -A`, then `git write-tree` | `55b821e36f7b6e568a0adfe9e7066adbc2aa9ed5` |
 
 `git apply` leaves the new files untracked, so the last check stages everything first (that changes no file).  A build
 folder named `build*` at the top is ignored by llama.cpp's `.gitignore`; check before configuring if it lives elsewhere
@@ -92,6 +92,8 @@ All systems:
   itself).  Without `jq` it skips its tree check without saying so: check the tree yourself.  If it reports that it fell
   back to `git am -3`, the base was not the pinned commit.  Do not pass `--include-optional` or `--include-beta`: the
   result is then not the measured tree.
+- `git apply` of J6 warns about one new blank line at the end of a file (`ggml/src/ggml-cuda/spec-step.cu`).  Harmless:
+  the patch is applied as it is, and the tree check above includes that line.
 - Configure logs `UI: no assets available - building without an embedded UI` with `LLAMA_USE_PREBUILT_UI=OFF`, and may
   log `UI: download dist.tar.gz... failed` without it.  Harmless: the build works offline, and `llama-server
   --no-webui` does not need the web UI.

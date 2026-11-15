@@ -181,20 +181,17 @@ How a step goes to the GPU.
 
 | part | what | switch | type |
 |---|---|---|---|
-| GPU-resident loop | with drafts, a step's sampling, draft acceptance (with J4's guard, J5's lenience and J3's verification), the next input and the KQ mask are made on the device; server requests and two sequences in one step run in it.  On this llama.cpp base the host checks each step before the next is queued (as fast at 8K, 1.6 % faster per step at 32K and 110K than queuing one ahead) | `FRANK_STEP_LOOP` (on with one GPU, a ROCm one, on Linux and Windows; off with several GPUs), `FRANK_STEP_LOOP_SEQ2` (on), `FRANK_DEVICE_INPUT_MAPPED` (on), `FRANK_STEP_AHEAD` (off; on queues one step ahead, with the recurrent state's whole-batch rollback `FRANK_RS_WHOLE_BATCH`); rdna-boosts' `LLAMA_DEVICE_INPUT` follows the loop when unset | speed |
+| GPU-resident loop | with drafts, a step's sampling, draft acceptance (with J4's guard, J5's lenience and J3's verification), the next input and the KQ mask are made on the device; server requests and two sequences in one step run in it.  The host checks each step before the next is queued | `FRANK_STEP_LOOP` (on with one GPU, a ROCm one, on Linux and Windows; off with several GPUs), `FRANK_STEP_LOOP_SEQ2` (on), `FRANK_DEVICE_INPUT_MAPPED` (on); rdna-boosts' `LLAMA_DEVICE_INPUT` follows the loop when unset | speed |
 | graphs for wider verification | the host path also records verify batches of 9-16 tokens as HIP graphs | `FRANK_GRAPH_MAX_TOKENS` (16) | speed |
 
 The loop gives greedy output identical to the host path; at temperature > 0 the draft model's placement can change a token,
 as on the host path.
 
-- References: K. Zhu, Y. Gao, Y. Zhao et al., "NanoFlow: Towards Optimal Large Language Model Serving Throughput",
-  OSDI 2025, arXiv:2408.12757, §4.2.1 (the next batch built and issued before the current one ends, its results checked a
-  step later: `FRANK_STEP_AHEAD`).  The vLLM Gaudi plugin's documentation, "Bucketing mechanism" (lengths padded so a
-  recorded graph is replayed; the loop's verify graphs span `FRANK_STEP_KV_HEADROOM` free cells for the same reason).
-  R. Hasan, N. Korobov, R. Kobus, H. Huang, D. Mehra, "NVIDIA TensorRT-LLM Now Supports Recurrent Drafting for
-  Optimizing LLM Inference", NVIDIA Technical Blog, 2024 (drafting and validation inside the engine instead of the host
-  runtime); the SGLang Team, "SGLang v0.4: Zero-Overhead Batch Scheduler, Cache-Aware Load Balancer, Faster Structured
-  Outputs", LMSYS blog, 2024 (`FRANK_STEP_AHEAD`: the scheduler one batch ahead).  Built on: Alan Gray, "Optimizing
+- References: the vLLM Gaudi plugin's documentation, "Bucketing mechanism" (lengths padded so a recorded graph is
+  replayed; the loop's verify graphs span `FRANK_STEP_KV_HEADROOM` free cells for the same reason).  R. Hasan,
+  N. Korobov, R. Kobus, H. Huang, D. Mehra, "NVIDIA TensorRT-LLM Now Supports Recurrent Drafting for Optimizing LLM
+  Inference", NVIDIA Technical Blog, 2024 (drafting and validation inside the engine instead of the host
+  runtime).  Built on: Alan Gray, "Optimizing
   llama.cpp AI Inference with CUDA Graphs", NVIDIA Technical Blog, 2024 (llama.cpp's graphs, which the wider verify batches
   join).
 
@@ -222,6 +219,13 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-15: J6 v7.**  With two sequences in one step, the loop read each sequence's recurrent state from the cell its
+last host batch read, not the one it wrote.  When `find_slot()` swapped the two sequences' cells (two requests
+overlapping, as with `--parallel 2`), each sequence read the other's state and both answers turned to garbage; the loop
+now reads the cell written.  `FRANK_STEP_LOOP_SEQ2=0` no longer aborts.  The opt-in step issued ahead
+(`FRANK_STEP_AHEAD`, with `FRANK_RS_WHOLE_BATCH`) is removed: one step at a time was as fast or faster.  Otherwise the
+same output as J6 v6.
 
 **2026-11-14: J1 v4, J2 v6, J3 v4, J4 v1, J5 v3, J6 v6, J7 v1** (the first release of the groups; the versions count the
 changes made before it).  The patches of this repo's earlier form (llama-cpp-overdoing, 0001-0015) and a new GPU-resident
