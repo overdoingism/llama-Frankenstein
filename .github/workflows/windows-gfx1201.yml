@@ -9,7 +9,7 @@ on:
     inputs:
       rdna_boosts:
         description: "llama-cpp-rdna-boosts release tag the patches are applied on"
-        default: "v17-a691b2345-r277"
+        default: "v16-4f9dfa0e3-r295"
   push:
     branches: [ci-windows]
 
@@ -19,7 +19,7 @@ permissions:
   attestations: write
 
 env:
-  RB_TAG: ${{ inputs.rdna_boosts || 'v17-a691b2345-r277' }}
+  RB_TAG: ${{ inputs.rdna_boosts || 'v16-4f9dfa0e3-r295' }}
   ROCM_URL: https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx120X-all-10.0.0.tar.gz
   ROCM_SHA256: 75da73c483cbc0456d9008f2079b333f4f9d3b7744705378ff8007e502ca38c5
 
@@ -49,7 +49,7 @@ jobs:
           git -C llama.cpp checkout --quiet "$BASE"
           cd llama.cpp
           bash ../rdna-boosts/scripts/apply-all.sh .
-          for p in ../overdoing/patches/J?-a69-*.patch; do
+          for p in ../overdoing/patches/J?-4f9-*.patch; do
             echo "applying $(basename "$p")"
             git apply "$p"
           done

@@ -4,8 +4,9 @@ What each group in [`patches/`](patches) contains, its switches (default in brac
 from, the lossy parts with their KLD, and the change log.  The short table is in the [README](README.md#structure).
 Written with Claude (AI).
 
-The seven groups follow the order of inference, and each is one patch: `J<n>-a69-<part>-v<version>.patch`, applied in
-number order on rdna-boosts `v17-a691b2345-r277`.  A group alone is not guaranteed to build; every part has a switch.
+The seven groups follow the order of inference, and each is one patch: `J<n>-4f9-<part>-v<version>.patch`, applied in
+number order on rdna-boosts `v16-4f9dfa0e3-r295`.  A group alone is not guaranteed to build; every part has a switch.  A
+version with a decimal (`v4.1`) is a group adapted to a new base, nothing else; its next change drops the decimal.
 
 Types: `speed` = faster, the same output; `memory` = less VRAM, the same output; `speed/diff` = faster, output not
 bit-identical to the stock code but within the run-to-run floor; `speed/lossy` = faster, error above the floor;
@@ -219,6 +220,13 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-17: J1 v4.1, J2 v7.1, J3 v4.1, J6 v7.1** on rdna-boosts `v16-4f9dfa0e3-r295` (llama.cpp `4f9dfa0e3`, the 1.0
+line); J4 v1, J5 v3 and J7 v1 move as they are.  Only what the new base needed: J1 includes `<mutex>` itself; J2's fp8
+prefill path takes the RMS norm only when its input and output are F32 (upstream's norm can now write BF16); J3 follows
+upstream's new `quantize_row_q8_1_cuda` arguments, its always-fused Gated DeltaNet (the anchored verify marks no fused
+nodes) and its op count; J6 grows the KV regions with upstream's new count of used cells.  Against r277: the same tokens
+and log-probs, the same time per step.
 
 **2026-11-16: J2 v7.**  Improves reliability on Windows.
 

@@ -85,8 +85,8 @@ the order of work is off; a switch you set still wins (`FRANK_ALL=0 FRANK_FA_FP8
 bit-identical: the fused kernels and A/B switches listed [below](#ab-switches-normally-unset), the shared KQ block table,
 the state copies in bands and in the background, and the pinned pools.  `FRANK_FA_Q8R` stays on too, but only acts on a
 `q8_0r` cache, which plain rdna-boosts does not have.  On r269, `FRANK_ALL=0` with a `q8_0` cache gave the same 512 decoded
-tokens as plain rdna-boosts with the draft model, and a KLD of 0 against it; on r277, the same three replies as plain
-rdna-boosts (2026-11-14).
+tokens as plain rdna-boosts with the draft model, and a KLD of 0 against it; on r277 and on r295, the same three replies as
+plain rdna-boosts (2026-11-14, 2026-11-17).
 
 ## Tuning (normally unset)
 

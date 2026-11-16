@@ -15,8 +15,8 @@ applied by its own script, then this repository's seven patches.  `llama-server`
 
 | what | version |
 |---|---|
-| llama.cpp | commit `a691b2345844ce1b430201fc5fd404ce062e05f2` (also in rdna-boosts' `release.json`, field `base`) |
-| llama-cpp-rdna-boosts | release tag `v17-a691b2345-r277` = commit `dc6bb7f04b5ff635a9249e465294fe6eb6d1074e`.  If the tag or the repository is gone: the tag `pin/v17-a691b2345-r277` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), the same commit |
+| llama.cpp | commit `4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad` (10 commits after the `v1.0.0` tag; also in rdna-boosts' `release.json`, field `base`) |
+| llama-cpp-rdna-boosts | release tag `v16-4f9dfa0e3-r295` = commit `58184e329cc3de5b272ce9c6f77d04ecb8d44f16`.  If the tag or the repository is gone: the tag `pin/v16-4f9dfa0e3-r295` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), the same commit |
 | this repository | `patches/J1-*.patch` to `patches/J7-*.patch`, all seven, in that order |
 | ROCm | 10.0.0 with hipBLASLt.  Linux: AMD's TheRock Python packages `rocm[libraries,devel,device-gfx1201]==10.0.0`, whose `_rocm_sdk_devel` folder is the ROCm root.  Windows: TheRock's `therock-dist-windows-gfx120X-all-10.0.0` (URL and SHA-256 in the [CI workflow](.github/workflows/windows-gfx1201.yml)).  HIP compiler: that release's clang (`AMD clang version 23.0.0git`, llvm-project `8f497e0992fb`) |
 | compilers, build tools | Linux: GCC 13.3 for C / C++, CMake 3.28, make.  Windows: the SDK's clang for C, C++ and HIP, Visual Studio 2022 (not 2026) for the libraries and tools, CMake 4.3, Ninja, Git for Windows |
@@ -55,9 +55,9 @@ applied by its own script, then this repository's seven patches.  `llama-server`
 
 | after | command | tree |
 |---|---|---|
-| the llama.cpp checkout | `git rev-parse HEAD^{tree}` | `9d7b9a02f0864295926888b2ca0ea1f57e6d977d` (`release.json` field `base_tree`) |
-| `apply-all.sh` | `git rev-parse HEAD^{tree}` | `0104361a095f7463d52376a408b8a7863d83f2d7` (`release.json` field `tree`); the branch tip is commit `9d7c0502c9b023fc438044fd3ca2e7cfc47631f6` (field `tip`) |
-| the seven patches | `git add -A`, then `git write-tree` | `7e65fdcd01a301bbc28f77c68d7e2956e9700ed0` |
+| the llama.cpp checkout | `git rev-parse HEAD^{tree}` | `cfb1f99a2793d89250533834737764cebff10be7` (`release.json` field `base_tree`) |
+| `apply-all.sh` | `git rev-parse HEAD^{tree}` | `bdfd4a182dc9bdf9a7b6a46a0f206622f37b5e34` (`release.json` field `tree`); the branch tip is commit `713a75c1aba315ceda42c9d7a0e86e831dfbc3dc` (field `tip`, there shortened to `713a75c1a`) |
+| the seven patches | `git add -A`, then `git write-tree` | `ce22d35dbf6888af27871d4fa3a7502c22161ec6` |
 
 `git apply` leaves the new files untracked, so the last check stages everything first (that changes no file).  A build
 folder named `build*` at the top is ignored by llama.cpp's `.gitignore`; check before configuring if it lives elsewhere
@@ -85,13 +85,14 @@ them.
 
 All systems:
 
-- `v17-a691b2345-r277` is an annotated tag: `git rev-parse v17-a691b2345-r277` prints the tag object (`605b6423...`), not
-  the commit.  Compare `git rev-parse v17-a691b2345-r277^{commit}` with the commit above.  The `pin/` tag in the fork
+- `v16-4f9dfa0e3-r295` is an annotated tag: `git rev-parse v16-4f9dfa0e3-r295` prints the tag object (`94e8b985...`), not
+  the commit.  Compare `git rev-parse v16-4f9dfa0e3-r295^{commit}` with the commit above.  The `pin/` tag in the fork
   points at the commit itself.
 - `apply-all.sh` needs a clean llama.cpp tree and no existing `rdna-boosts` branch (it sets the committer identity
   itself).  Without `jq` it skips its tree check without saying so: check the tree yourself.  If it reports that it fell
   back to `git am -3`, the base was not the pinned commit.  Do not pass `--include-optional` or `--include-beta`: the
-  result is then not the measured tree.
+  result is then not the measured tree.  It prints one `new blank line at EOF` warning while applying block 00; harmless,
+  the tree check covers it.
 - `git apply` of J6 warns about one new blank line at the end of a file (`ggml/src/ggml-cuda/spec-step.cu`).  Harmless:
   the patch is applied as it is, and the tree check above includes that line.
 - Configure logs `UI: no assets available - building without an embedded UI` with `LLAMA_USE_PREBUILT_UI=OFF`, and may

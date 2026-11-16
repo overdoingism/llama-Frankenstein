@@ -47,7 +47,8 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
   an English text, against the same build with every switch off.  That build is plain rdna-boosts: its 512 decoded tokens
   are the same as stock r269's with the draft, and its KLD to stock r269 is 0.  On r277 (rdna-boosts' r270-r277 change
   multi-GPU all-reduce, host-resident MoE and loading, nothing on this path) the set gave the same tokens and log-probs as on
-  r269 and the same time per step (2026-11-14; the 32K prompt: 2738 / 63.0).  In brackets, the multiple of the floor: the
+  r269 and the same time per step (2026-11-14; the 32K prompt: 2738 / 63.0); on r295 (llama.cpp's 1.0 line) the same
+  again against r277 (2026-11-17; the 32K prompt: 2746 / 63.2).  In brackets, the multiple of the floor: the
   same comparison for one bit of K changed in an emulated build, at the same batch width.  Generation: batches of 1, 6 and
   16 tokens (decode, DFlash2 verification, n-gram verification), the one furthest above its floor; here always 1 and 6,
   which give the same bits.  Prompt processing: one 400-token batch, as in tools that score every token of a prompt (a
@@ -74,8 +75,8 @@ here.
 
 | what | pinned at |
 |---|---|
-| llama.cpp | commit `a691b2345844ce1b430201fc5fd404ce062e05f2` |
-| llama-cpp-rdna-boosts | release `v17-a691b2345-r277`, commit `dc6bb7f04b5ff635a9249e465294fe6eb6d1074e`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v17-a691b2345-r277` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
+| llama.cpp | commit `4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad` (the 1.0 line) |
+| llama-cpp-rdna-boosts | release `v16-4f9dfa0e3-r295`, commit `58184e329cc3de5b272ce9c6f77d04ecb8d44f16`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v16-4f9dfa0e3-r295` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
 | this repository | the seven patches in [`patches/`](patches), all of them, J1 to J7 in that order |
 | ROCm | 10.0.0 with hipBLASLt, the HIP code compiled for gfx1201 |
 

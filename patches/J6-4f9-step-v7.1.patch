@@ -1,209 +1,8 @@
-From c56685fb5211f90f26776fa75d9b7aea40987309 Mon Sep 17 00:00:00 2001
-From: overdoingism <overdoingism@users.noreply.github.com>
-Date: Sat, 14 Nov 2026 03:47:47 +0800
-Subject: [PATCH] J6v7: launching the steps: the GPU-resident speculative loop
- (on by default on Linux with one ROCm GPU), two sequences in one step, HIP
- graphs up to 16 tokens
-
----- BigOne stage 1: the GPU-resident speculative loop (FRANK_STEP_LOOP=1, LLAMA_DEVICE_INPUT=1)
-
-Device-side speculative steps: greedy argmax, draft acceptance and the DFlash2 lattice walk; the decode / verify graph
-inputs in a per-context device slab, written by the device (next verify's tokens, positions, KV cells, KQ mask,
-recurrent rollback inputs, the drafter's inputs) and audited against the host in the host loop; per-sequence drafter
-rings taken lowest-free; chunked device argmax; a small step-mode sliding-window batch attends to its ring only.
-Requests with a temperature run in the loop too (sampler chain, probabilistic walk, rejection; radix-select top-k,
-one block per walked sequence), text identical to the host path.
-
-Squashed from 2dc5f1f2b 825533457 6bb5552c6 f6faec14a 5bc66d4a4 e731c6fba 35290cccb 47882e865 a0786160e c720044ce
-d39b879d4 dfb58a88c f86fb0cac.
-
-(from c8f5b7f5d)
-
-(from ad2ec67e0)
-
----- BigOne loop on a691b2345: the drafter's read of the target's layer inputs through upstream's events (#31506)
-
-F1 (the delivery's layer-input device store) is gone from the base; upstream's own buffer (llama_set_embeddings_layer_inp_dev,
-ev_layer_inp_written / ev_layer_inp_read) replaces it.  The loop's two touch points move over: a replayed target graph waits
-for the drafter's read of the previous batch and records the rows written, as decode() does; llama_step_layer_inp_read()
-records the read after the drafter's replayed injection (was llama_lf_signal_features_consumed).  The drafter's row input
-keeps the name dflash_inp_rows for the step slab.
-
-(from a4f7158f2)
-
----- BigOne stage 5: production requests in the GPU-resident loop, two sequences in one batch (FRANK_STEP_LOOP_SEQ2=1)
-
-Lazy grammar, ngram-mod and the adaptive width inside the loop; the drafter's graphs on the target's stream
-(FRANK_STEP_ONE_STREAM); the verify mask follows the sequence's cells; a step-mode sliding-window ubatch places each
-token in its own sequence's ring; verify graphs keep free cells past the used ones (FRANK_STEP_KV_HEADROOM); a mapped
-buffer type for the token embedding (FRANK_DEVICE_INPUT_MAPPED).  Two sequences verify in one batch, and one sequence
-also runs in the cells mode (cells as find_slot() hands them out; free cells below the top go to the device as a list).
-The step graphs are captured as HIP graphs above 8 tokens too (FRANK_STEP_GRAPH_WIDE=0 turns it off).
-
-Squashed from c0c05a4da 822b130a2 02060fd47 7a0fdaaf6 e66c673e2 058d6f801 4f47e7d5f 4933e32e7 0d148667e d94a145ad
-8b0146f3d b2fe399bc 2343cc1ca 3c16a4576.
-
-(from 18471f60f)
-
-(from f839ec808)
-
----- ggml-cuda: FRANK_GRAPH_MAX_TOKENS, the most tokens of a host-path graph that is still captured as a HIP graph
-
-A graph of more than MMVQ_MAX_BATCH_SIZE (8) tokens ran node by node on the host path; the GPU-resident loop's step
-graphs already lift the limit (FRANK_STEP_GRAPH_WIDE).  What stays on the host path above 8 tokens is mostly the
-n-gram drafts' 9..16-token verifies (a copy request: 5 of 99 steps in the loop).  FRANK_GRAPH_MAX_TOKENS=16 captures
-those too: a 1500-token copy request 50.6 -> 49.0 ms per step (-3.3%), the same text, no VRAM change; other requests
-unchanged.  Default unchanged (8).
-
-(from ef18a54c8)
-
-(from 6579f2866)
-
----- BigOne: the GPU-resident loop and its companions on by default
-
-Production has run them since 2026-11-05 (work36..work51).  Unset, each is now on, and off with FRANK_ALL=0:
-- FRANK_STEP_LOOP: on with one GPU, a ROCm one, on Linux, where it was measured (-5.7..-5.9 % per step at 8K / 110K with
-  drafts; greedy output the same as the host path).  Off on Windows and with several GPUs, where it is not tested.
-  llama_step_loop_enabled() gives common the same answer the library uses.
-- LLAMA_DEVICE_INPUT (rdna-boosts'): unset, it follows the loop, which needs the token lookup in the graph.
-- FRANK_DEVICE_INPUT_MAPPED: the token embedding read in place from pinned host memory (0.66 GiB less VRAM, the same
-  bytes); off on Windows by default.
-- FRANK_STEP_LOOP_SEQ2: two sequences in one loop step.
-- FRANK_GRAPH_MAX_TOKENS: 16, so host-path verifies of 9..16 tokens are captured too (copying -3.3 % per step).
-
-(from 8d0c86dee)
-
-(from cbb564850)
-
----- a691b2345 port: whole-batch rollback when anchored (option A); kv_rows off unless FRANK_KV_ROWS=1 (the rest)
-
-- Upstream writes the conv rollback snapshots with one set_rows into min(n, n_rs_seq + 1) slots (#31660) and refuses a
-  rollback past the last ubatch's snapshots (#31368).  The GPU-resident loop drops a step whole when a request stops, so
-  an anchored memory (FRANK_RS_ANCHOR) also writes slot n, the conv state before the ubatch (the window at column 0), and
-  allows a rollback of the whole ubatch (min(n_rs_seq, n_fac)).  step_restore() sets the cell's rs_max as find_slot() does.
-- Upstream's kv_rows (#29510: unified-cache attention over per-sequence cell lists) is on by default with --kv-unified.  Our
-  attention kernels read K / V columns as cells and the loop writes the dense mask, so it stays off unless FRANK_KV_ROWS=1
-  (unset with FRANK_ALL=0: on, as the release), and an op in the kv_rows form never takes our kernels.
-
-(from d19504f70)
-
----- a691b2345 port: option B -- the loop one step at a time (FRANK_STEP_AHEAD=0), and FRANK_RS_WHOLE_BATCH=0
-
-The GPU-resident loop issues a step before the last one is committed and drops it whole when the request stops (option A
-keeps that possible: the anchored memory's whole-batch rollback).  Option B for comparison: FRANK_STEP_AHEAD=0 issues the
-next step only after the last one is committed, so a stop drops no step and no whole-batch rollback is needed;
-FRANK_RS_WHOLE_BATCH=0 turns option A off (the release's rs_max bound, no slot n).  FRANK_STEP_AHEAD follows
-FRANK_RS_WHOLE_BATCH when unset, so the loop never drops a step the memory cannot roll back.
-
-(from 8863250cd)
-
----- a691b2345 port: the loop one step at a time by default (option B); whole-batch rollback opt-in
-
-Measured on production's setup (research/rebase-a691-port-20261109.md 4.2): one step at a time is as fast at 8K and 1.6 %
-faster per step at 32K and 110K than issuing a step ahead, with the same text; the pre-ubatch slot itself costs nothing
-(A1 = B).  So FRANK_RS_WHOLE_BATCH and FRANK_STEP_AHEAD are off unless set to 1 (FRANK_STEP_AHEAD follows
-FRANK_RS_WHOLE_BATCH when unset), and the loop never drops a step.
-
-(from 2f8e6821d)
-
----- BigOne step slab: the upload waits for the backend's queued work (fixes a race: a queued decode / verify graph read the next ubatch's inputs)
-
-end_fill() uploads the whole slab with ggml_backend_tensor_set, which does not run on the backend's
-stream, while graphs still queued there read the same slots (positions, KV indices, mask, s_copy,
-anchor rows).  Under concurrent requests a ubatch computed part of its layers with the next ubatch's
-inputs (the 6b retest's item 4 divergence: ERP 21, onset layer 17 or 20, not reproducible).  The
-upload now synchronizes the backend first; FRANK_SLAB_SYNC=0 skips that (A/B only).
-
-(from a19297f1e)
-
----- step ahead: FRANK_STEP_AHEAD=1 turns on the whole-batch rollback it needs
-
-FRANK_STEP_AHEAD=1 alone issued steps ahead while the recurrent memory kept the release's rollback bound, so a step dropped
-at a request's end could not be rolled back (the loop's hand-back would fail).  FRANK_RS_WHOLE_BATCH now follows
-FRANK_STEP_AHEAD when it is unset (llama_memory_recurrent_whole_batch, read by the memory and the graph), and
-FRANK_STEP_AHEAD=1 with FRANK_RS_WHOLE_BATCH=0 stays off with a warning.  Both unset: off, as before.  The comment no
-longer cites a document outside the code.
-
-(from 64deb73ce)
-
----- Windows like Linux: the GPU-resident loop and the mapped token embedding on by default, --poll 0 by default
-
-The loop (FRANK_STEP_LOOP) and the mapped token embedding (FRANK_DEVICE_INPUT_MAPPED) were off by default on Windows because
-they had not been run there.  Measured on Windows 11-13 (R9700, TheRock ROCm 10, r269, -c 200000 -ub 1536, q8_0r, DFlash2 n-max
-5, H L M M L H): greedy text and draft counts the same as the host path at 8K / 32K / 110K, per step -7.6 / -6.7 / -6.2 %
-(tokens/s +9.3 / +6.9 / +7.0 %); the loop alone takes 0.95 GiB more VRAM, with the mapped table 0.13 GiB more (0.8 GiB of pinned
-host memory instead).  Both now follow the same rule as on Linux: on with one GPU, a ROCm one; FRANK_ALL=0 and 0 turn them off.
-Windows builds without OpenMP spin ggml's thread pool after every step's CPU part at the default --poll 50 (4.2-4.4 cores of
-a Ryzen 7 5700G, 0.85-0.91 at 0, the same speed and text): the default is 0 on Windows; --poll still sets it.
-
-(from 92f642c8a)
-
----- spec step: end-of-generation check as a plain scan; credit the published designs
-
-spec_is_eog compares the id with each of the vocabulary's few end-of-generation ids instead of a binary
-search (the same answer for any list; the list no longer has to be sorted).  The headers name TensorRT-LLM's
-ReDrafter (acceptance inside the engine) and NanoFlow's asynchronous scheduling (sec. 4.2.1) for the step
-queued ahead.
-
-(from 7fe690ad0)
-
----- J6v7 (2026-11-15): the loop reads the recurrent state from the cell the last host batch wrote (with two sequences
-find_slot may swap the cells; the loop read the cell the batch read from, so each sequence read the other's state); the
-single-sequence cell-position context sized for its two tensors (FRANK_STEP_LOOP_SEQ2=0 aborted); the opt-in step issued
-ahead (FRANK_STEP_AHEAD) and the whole-batch rollback it needed (FRANK_RS_WHOLE_BATCH) removed, with the drafter ring's
-save before every loop step, its undo, llama_step_ring_rows and llama_step_restore.p_keep.
-
-Squashed from 5818f9070 b7a802776 9d4825fca.
----
- common/CMakeLists.txt            |    1 +
- common/common.cpp                |    7 +
- common/common.h                  |    7 +
- common/sampling.cpp              |  113 ++
- common/sampling.h                |   29 +
- common/speculative.cpp           |  172 +++
- common/speculative.h             |   18 +
- common/step-audit.cpp            | 1813 ++++++++++++++++++++++++++++++
- common/step-audit.h              |  117 ++
- ggml/include/ggml-spec-step.h    |  253 +++++
- ggml/src/ggml-cuda/common.cuh    |    2 +
- ggml/src/ggml-cuda/ggml-cuda.cu  |  267 ++++-
- ggml/src/ggml-cuda/spec-step.cu  |  901 +++++++++++++++
- ggml/src/ggml-cuda/spec-step.cuh |   13 +
- include/llama.h                  |   77 ++
- src/CMakeLists.txt               |    1 +
- src/llama-context.cpp            |  325 ++++++
- src/llama-context.h              |   30 +
- src/llama-graph.cpp              |    9 +-
- src/llama-kv-cache-iswa.cpp      |    8 +
- src/llama-kv-cache.cpp           |  311 ++++-
- src/llama-kv-cache.h             |   39 +-
- src/llama-memory-recurrent.cpp   |   32 +-
- src/llama-memory-recurrent.h     |    4 +
- src/llama-model-loader.cpp       |   25 +
- src/llama-model.cpp              |    3 +-
- src/llama-sampler.cpp            |   38 +
- src/llama-step.cpp               |  396 +++++++
- src/llama-step.h                 |  108 ++
- src/models/dflash.cpp            |    2 +
- tests/CMakeLists.txt             |    2 +
- tests/test-spec-step.cpp         | 1047 +++++++++++++++++
- tools/server/server-context.cpp  |  636 +++++++++++
- tools/server/server-queue.h      |    6 +
- 34 files changed, 6788 insertions(+), 24 deletions(-)
- create mode 100644 common/step-audit.cpp
- create mode 100644 common/step-audit.h
- create mode 100644 ggml/include/ggml-spec-step.h
- create mode 100644 ggml/src/ggml-cuda/spec-step.cu
- create mode 100644 ggml/src/ggml-cuda/spec-step.cuh
- create mode 100644 src/llama-step.cpp
- create mode 100644 src/llama-step.h
- create mode 100644 tests/test-spec-step.cpp
-
 diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
-index 49fa1b296..d654291d9 100644
+index 688639a72..c0232f1dd 100644
 --- a/common/CMakeLists.txt
 +++ b/common/CMakeLists.txt
-@@ -110,6 +110,7 @@ add_library(${TARGET}
+@@ -112,6 +112,7 @@ add_library(${TARGET}
      sampling.cpp
      sampling.h
      speculative.cpp
@@ -212,10 +11,10 @@ index 49fa1b296..d654291d9 100644
      subproc.cpp
      subproc.h
 diff --git a/common/common.cpp b/common/common.cpp
-index 01c117b33..56816348d 100644
+index 5097b921f..15160cc1e 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
-@@ -2125,6 +2125,13 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -2185,6 +2185,13 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.n_ctx             = params.n_ctx;
      cparams.n_seq_max         = params.n_parallel;
      cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
@@ -230,7 +29,7 @@ index 01c117b33..56816348d 100644
      // verify batch with more tokens than this cannot be rolled back into
      cparams.n_rs_batch        = std::max(1, common_speculative_n_max(&params.speculative) + 1);
 diff --git a/common/common.h b/common/common.h
-index 9537f9ec5..8a2de53e9 100644
+index 43bafa5a3..d6bff482a 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -77,7 +77,14 @@ struct common_cpu_params {
@@ -457,7 +256,7 @@ index 49e56aea2..dbdb2e338 100644
  std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const std::vector<std::vector<llama_token_data>> & draft_q, bool grammar_first = false);
  
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index d8ed695e0..6e006fa5c 100644
+index ad1eb32f8..f7af7c5c2 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -356,6 +356,11 @@ struct common_speculative_impl {
@@ -504,7 +303,7 @@ index d8ed695e0..6e006fa5c 100644
      // partial acceptance on a context that cannot roll back: the next round replays, so the feedback comes here
      void accept_partial(llama_seq_id seq_id, uint16_t n_accepted) override {
          if (adapt && seq_id >= 0 && seq_id < (llama_seq_id) n_seq) {
-@@ -4196,6 +4226,148 @@ void common_speculative_accept_partial(common_speculative * spec, llama_seq_id s
+@@ -4281,6 +4311,148 @@ void common_speculative_accept_partial(common_speculative * spec, llama_seq_id s
  }
  
  // TODO: support the case of more than one speculative implementations having a state
@@ -654,7 +453,7 @@ index d8ed695e0..6e006fa5c 100644
      if (spec == nullptr) {
          return false;
 diff --git a/common/speculative.h b/common/speculative.h
-index c1bd50b1e..f36b6c5f5 100644
+index c2a56fe83..b2cc7b7cf 100644
 --- a/common/speculative.h
 +++ b/common/speculative.h
 @@ -116,6 +116,24 @@ void common_speculative_accept_partial(common_speculative * spec, llama_seq_id,
@@ -2884,23 +2683,23 @@ index 000000000..4d673ba63
 +}
 +#endif
 diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
-index 213432d25..0e1a9b577 100644
+index cdef3ce69..2e2863714 100644
 --- a/ggml/src/ggml-cuda/common.cuh
 +++ b/ggml/src/ggml-cuda/common.cuh
-@@ -1895,6 +1895,8 @@ struct ggml_backend_cuda_context {
+@@ -1771,6 +1771,8 @@ struct ggml_backend_cuda_context {
      int                          splice_pin_idx = 0;
  
-     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
+     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {};
 +    // BigOne stage 5: while another backend's main stream stands in for this one's (ggml_backend_cuda_share_stream), the own one
 +    cudaStream_t stream_own = nullptr;
-     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {nullptr};
-     void * cublas_workspaces[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {nullptr};
-     size_t cublas_workspace_sizes[GGML_CUDA_MAX_DEVICES] = {0};
+     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {};
+     void * cublas_workspaces[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {};
+     size_t cublas_workspace_sizes[GGML_CUDA_MAX_DEVICES] = {};
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index ae9a79ba6..94489f97f 100644
+index 47077e0b6..9564b8c81 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -92,6 +92,7 @@
+@@ -95,6 +95,7 @@
  #include "ggml-cuda/fill.cuh"
  #include "ggml-cuda/lightning-indexer.cuh"
  #include "ggml-cuda/top-k-mask.cuh"
@@ -2908,9 +2707,9 @@ index ae9a79ba6..94489f97f 100644
  #include "ggml.h"
  
  #include <algorithm>
-@@ -1562,6 +1563,9 @@ struct ggml_backend_cuda_buffer_context {
-     // [off + s*nb2, off + s*nb2 + n_cells*nb1) extent without knowing anything about the KV cache.
-     struct vmm_tens { size_t off; size_t nb1; size_t nb2; int64_t ne2; int64_t cells; };
+@@ -1744,6 +1745,9 @@ struct ggml_backend_cuda_buffer_context {
+         size_t   dev_bytes;  // the unit-aligned VRAM watermark inside one stream of this tensor
+     };
      std::vector<vmm_tens>  vmm_tensors;
 +    // BigOne: the mapped buffer type -- `dev_ptr` is the device view of this pinned system RAM allocation, freed
 +    // here with cudaFreeHost (ggml_backend_cuda_mapped_buffer_type)
@@ -2918,7 +2717,7 @@ index ae9a79ba6..94489f97f 100644
      std::string name;
  
      ggml_backend_cuda_buffer_context(int device, void * dev_ptr) :
-@@ -1579,6 +1583,10 @@ struct ggml_backend_cuda_buffer_context {
+@@ -1761,6 +1765,10 @@ struct ggml_backend_cuda_buffer_context {
              ggml_cuda_slab_work_release(device, slab_off, slab_need);   // the slab owns the region; the slack may go to the arena
              return;
          }
@@ -2929,7 +2728,7 @@ index ae9a79ba6..94489f97f 100644
          // A compute buffer allocated from the slab is a VIEW (handled above); everything else here is a
          // plain cudaMalloc pointer.
          CUDA_CHECK(cudaFree(dev_ptr));
-@@ -2654,6 +2662,126 @@ ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device) {
+@@ -2836,6 +2844,126 @@ ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device) {
      return &ggml_backend_cuda_buffer_types[device];
  }
  
@@ -3056,7 +2855,7 @@ index ae9a79ba6..94489f97f 100644
  // ------------------------------------------------------------------------------------------------
  // wip/kv-residency (TODO #117): the KV REGION buffer type -- provider P1 for the KV cache.
  //
-@@ -7875,9 +8003,37 @@ static bool ggml_cuda_graph_trace() {
+@@ -8829,9 +8957,37 @@ static bool ggml_cuda_graph_trace() {
      return on;
  }
  
@@ -3095,10 +2894,10 @@ index ae9a79ba6..94489f97f 100644
  }
  
  // `GGML_CUDA_GRAPH_TRACE` also reports how each `graph_compute` call was served.  The distinction is
-@@ -11090,6 +11246,15 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
- // library gains no new public symbol and a backend without VMM simply does not answer.
- //   ggml_backend_cuda_kv_region_buft : ggml_backend_buffer_type_t (*)(ggml_backend_dev_t)  -- nullptr = no region
- //   ggml_backend_cuda_kv_region_grow : int (*)(ggml_backend_buffer_t, uint32_t n_cells)   -- 1 ok, 0 n/a, -1 refused
+@@ -12143,6 +12299,15 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+ //   ggml_backend_cuda_kv_region_grow : int (*)(ggml_backend_buffer_t, uint32_t n_cells, uint32_t n_used)
+ //                                      -- 1 ok, 0 n/a, -1 refused   (n_used = the unpadded extent: the
+ //                                      window's spill boundary follows it, the MAPPING follows n_cells)
 +static ggml_backend_buffer_type_t ggml_backend_cuda_mapped_buft_for_dev(ggml_backend_dev_t dev) {
 +    for (int i = 0; i < ggml_backend_cuda_get_device_count(); i++) {
 +        if (ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), i) == dev) {
@@ -3111,7 +2910,7 @@ index ae9a79ba6..94489f97f 100644
  static ggml_backend_buffer_type_t ggml_backend_cuda_kv_region_buft_for_dev(ggml_backend_dev_t dev) {
      for (int i = 0; i < ggml_backend_cuda_get_device_count(); i++) {
          if (ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), i) == dev) {
-@@ -11109,8 +11274,102 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_kv_region_buft_split_for_dev
+@@ -12162,8 +12327,102 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_kv_region_buft_split_for_dev
      return nullptr;
  }
  
@@ -3214,7 +3013,7 @@ index ae9a79ba6..94489f97f 100644
      if (strcmp(name, "ggml_backend_cuda_kv_pool_mirror_buft") == 0) {
          return (void *) ggml_backend_cuda_kv_pool_mirror_buft_for_dev;
      }
-@@ -11120,6 +11379,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -12173,6 +12432,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_cuda_kv_region_buft") == 0) {
          return (void *) ggml_backend_cuda_kv_region_buft_for_dev;
      }
@@ -3224,7 +3023,7 @@ index ae9a79ba6..94489f97f 100644
      if (strcmp(name, "ggml_backend_cuda_kv_region_buft_split") == 0) {
          return (void *) ggml_backend_cuda_kv_region_buft_split_for_dev;
      }
-@@ -11143,6 +11405,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -12199,6 +12461,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_cuda_fattn_stage_bound") == 0) {
          return (void *) ggml_backend_cuda_fattn_stage_bound;
      }
@@ -4161,10 +3960,10 @@ index 000000000..cf2953e7e
 +void ggml_cuda_spec_suppress(cudaStream_t stream, float * x, int64_t n_rows, int64_t row_stride, const int32_t * ids, int32_t n_ids);
 +void ggml_cuda_spec_sample(ggml_cuda_pool & pool, cudaStream_t stream, const ggml_spec_sample_params & p);
 diff --git a/include/llama.h b/include/llama.h
-index b219ac129..b9b3af526 100644
+index 65f4e0f05..3b3d3e0e4 100644
 --- a/include/llama.h
 +++ b/include/llama.h
-@@ -1291,6 +1291,73 @@ extern "C" {
+@@ -1264,6 +1264,73 @@ extern "C" {
      // returns NULL for invalid ids.
      LLAMA_API float * llama_get_logits_ith(struct llama_context * ctx, int32_t i);
  
@@ -4238,7 +4037,7 @@ index b219ac129..b9b3af526 100644
      // Get all output token embeddings.
      // when pooling_type == LLAMA_POOLING_TYPE_NONE or when using a generative model,
      // the embeddings for which llama_batch.logits[i] != 0 are stored contiguously
-@@ -1620,6 +1687,16 @@ extern "C" {
+@@ -1619,6 +1686,16 @@ extern "C" {
      /// seed == LLAMA_DEFAULT_SEED to use a random seed.
      LLAMA_API struct llama_sampler * llama_sampler_init_dist(uint32_t seed);
  
@@ -4268,7 +4067,7 @@ index 552915a68..d9535f5c2 100644
      llama-grammar.cpp
      llama-graph.cpp
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index a9c6e8b7f..09b815ccc 100644
+index 458873bc7..0b3349a8c 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -13,6 +13,7 @@
@@ -4279,7 +4078,7 @@ index a9c6e8b7f..09b815ccc 100644
  #include "llama-kv-cache-iswa.h"
  #include "llama-mmap.h"
  #include "llama-model.h"
-@@ -1860,6 +1861,161 @@ float * llama_context::get_logits_ith(int32_t i) {
+@@ -1869,6 +1870,161 @@ float * llama_context::get_logits_ith(int32_t i) {
      }
  }
  
@@ -4441,7 +4240,7 @@ index a9c6e8b7f..09b815ccc 100644
  float * llama_context::get_embeddings() {
      output_reorder();
  
-@@ -2776,6 +2932,31 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -2920,6 +3076,31 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
          // wip/moe-verify-fusions (narrow-2): route the MTP draft context's compute allocation to the
          // slab's pinned narrow-2 region (the reserve-time toggle in `graph_reserve` does not cover the
          // first `alloc_graph`).
@@ -4473,7 +4272,7 @@ index a9c6e8b7f..09b815ccc 100644
          const bool is_draft = cparams.ctx_other != nullptr;
          if (is_draft) {
              for (const auto & d : model.devices) {
-@@ -2796,6 +2977,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -2940,6 +3121,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
              ret = GGML_STATUS_ALLOC_FAILED;
              return nullptr;
          }
@@ -4485,7 +4284,7 @@ index a9c6e8b7f..09b815ccc 100644
  
          gf_res_prev_active = res;
      }
-@@ -2804,9 +2990,37 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -2948,9 +3134,37 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
      {
          //const auto t_start_us = ggml_time_us();
  
@@ -4523,7 +4322,7 @@ index a9c6e8b7f..09b815ccc 100644
          //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
      }
  
-@@ -3373,6 +3587,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+@@ -3539,6 +3753,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
          auto * t_embd    = cparams.embeddings       ? res->get_embd()     : nullptr;
          auto * t_h_nextn = cparams.embeddings_nextn ? res->get_h_nextn()  : nullptr;
  
@@ -4534,7 +4333,7 @@ index a9c6e8b7f..09b815ccc 100644
          if (t_embd && res->get_embd_pooled()) {
              t_embd = res->get_embd_pooled();
          }
-@@ -6426,6 +6644,113 @@ float * llama_get_logits(llama_context * ctx) {
+@@ -6634,6 +6852,113 @@ float * llama_get_logits(llama_context * ctx) {
      return ctx->get_logits();
  }
  
@@ -4649,7 +4448,7 @@ index a9c6e8b7f..09b815ccc 100644
      ctx->synchronize();
  
 diff --git a/src/llama-context.h b/src/llama-context.h
-index 3641e2017..367a902e7 100644
+index aba46ec56..432602672 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -3,6 +3,7 @@
@@ -4660,7 +4459,7 @@ index 3641e2017..367a902e7 100644
  #include "llama-graph.h"
  #include "llama-adapter.h"
  #include "llama-impl.h"
-@@ -500,6 +501,35 @@ private:
+@@ -528,6 +529,35 @@ private:
      ggml_backend_t backend_cpu = nullptr;
      std::vector<ggml_backend_ptr> backends;
  
@@ -4697,7 +4496,7 @@ index 3641e2017..367a902e7 100644
      // retained across saves and one buffer per context (state saves on one context must not run concurrently).
      ggml_backend_buffer_ptr buf_state_stage;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 98710a2a5..72fe507df 100644
+index 916ac2008..41cac06ec 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -55,11 +55,15 @@ ggml_tensor * llm_graph_context::build_attn_inp_kq_mask(
@@ -4725,7 +4524,7 @@ index 98710a2a5..72fe507df 100644
      res &= (kq_mask->ne[1] == n_tokens/n_stream);
      res &= (kq_mask->ne[2] == 1);
      res &= (kq_mask->ne[3] == n_stream);
-@@ -4299,7 +4304,7 @@ void llm_graph_context::build_conv_state_store(
+@@ -4314,7 +4319,7 @@ void llm_graph_context::build_conv_state_store(
      // [TAG_RECURRENT_ROLLBACK_SPLITS]
      // this logic assumes that the last (n_rs_seq + 1) tokens of a sequence in a batch are inside
      //   the same ubatch, which `split_equal()` guarantees via its n_keep_tail argument
@@ -4759,7 +4558,7 @@ index ac7d4009e..1d0143d9a 100644
      if (swa_full) {
          LLAMA_LOG_WARN("%s: using full-size SWA cache (ref: %s)\n",
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 0d796d192..ea6e5822f 100644
+index de203db7c..b45def85a 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -1,4 +1,5 @@
@@ -4768,7 +4567,7 @@ index 0d796d192..ea6e5822f 100644
  
  #include "llama-impl.h"
  #include "llama-io.h"
-@@ -1451,6 +1452,169 @@ static bool llama_kv_park_debug() {
+@@ -1560,6 +1561,169 @@ static bool llama_kv_park_debug() {
      return v;
  }
  
@@ -4938,7 +4737,7 @@ index 0d796d192..ea6e5822f 100644
  uint32_t llama_kv_cache::park_bound() const {
      uint32_t res = v_cells[0].size();
      for (const auto & [seq_id, range] : parked) {
-@@ -2262,6 +2426,64 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
+@@ -2371,6 +2535,64 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
          // with parked sequences (seq_park), the search covers only the cells below them
          const uint32_t n_cells = parked.empty() ? cells.size() : park_bound();
  
@@ -5003,8 +4802,8 @@ index 0d796d192..ea6e5822f 100644
          // if we have enough unused cells before the current head ->
          //   better to start searching from the beginning of the cache, hoping to fill it
          if (head_cur > cells.get_used() + 2*n_tokens || head_cur >= n_cells) {
-@@ -2775,9 +2997,45 @@ void llama_kv_cache::grow_regions(uint32_t n_kv) const {
-     }
+@@ -2905,9 +3127,45 @@ uint32_t llama_kv_cache::get_n_kv_used(const slot_info & sinfo) const {
+     return result;
  }
  
 +bool llama_kv_cache::step_ring_range(const slot_info & sinfo, uint32_t n_tokens, uint32_t & start) const {
@@ -5049,7 +4848,7 @@ index 0d796d192..ea6e5822f 100644
      // pad the n_kv value so that the graph remains constant across batches and can be reused
      // note: this also helps some backends with performance (f.ex https://github.com/ggml-org/llama.cpp/pull/16812#issuecomment-3455112220)
      // upstream hardcodes the 256-cell floor now (#31200 removed the n_pad parameter); the delivery adds the
-@@ -2796,6 +3054,22 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo, uint32_t n_tokens) co
+@@ -2926,6 +3184,22 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo, uint32_t n_tokens) co
      static const uint32_t n_pad_prefill_from = [] { const char * e = getenv("LLAMA_KV_N_PAD_PREFILL_FROM"); return e ? (uint32_t) atoi(e) : 4096u; }();
      const uint32_t n_pad_cur = std::max(n_pad, n_pad_min);
      const bool     prefill   = n_tokens > 64 && n_pad_prefill > n_pad_cur;
@@ -5072,7 +4871,7 @@ index 0d796d192..ea6e5822f 100644
  
      for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
          const auto & cells = v_cells[sinfo.strm[s]];
-@@ -2804,7 +3078,12 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo, uint32_t n_tokens) co
+@@ -2934,7 +3208,12 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo, uint32_t n_tokens) co
          const uint32_t used = parked.empty() ? cells.used_max_p1() : cells.used_max_p1_below(park_bound());
          const uint32_t pad  = prefill && GGML_PAD(used, n_pad_cur) > n_pad_prefill_from ? n_pad_prefill : n_pad_cur;
  
@@ -5086,7 +4885,7 @@ index 0d796d192..ea6e5822f 100644
      }
  
      return result;
-@@ -2903,7 +3182,7 @@ uint32_t llama_kv_cache::get_n_kv_rows(const llama_ubatch & ubatch) const {
+@@ -3033,7 +3312,7 @@ uint32_t llama_kv_cache::get_n_kv_rows(const llama_ubatch & ubatch) const {
      return std::min(std::max(n_pad_cur, GGML_PAD(n_max, n_pad_cur)), get_size());
  }
  
@@ -5095,7 +4894,7 @@ index 0d796d192..ea6e5822f 100644
      const int32_t ikv = map_layer_ids.at(il);
  
      auto * k = layers[ikv].k;
-@@ -2920,10 +3199,10 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
+@@ -3050,10 +3329,10 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
              ggml_row_size(k->type, hparams.n_embd_head_k(il)),
              ggml_row_size(k->type, n_embd_k_gqa),
              ggml_row_size(k->type, n_embd_k_gqa*kv_size),
@@ -5108,7 +4907,7 @@ index 0d796d192..ea6e5822f 100644
      const int32_t ikv = map_layer_ids.at(il);
  
      auto * v = layers[ikv].v;
-@@ -2943,7 +3222,7 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
+@@ -3073,7 +3352,7 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
                  ggml_row_size(v->type, hparams.n_embd_head_v(il)),          // v->nb[1]
                  ggml_row_size(v->type, n_embd_v_gqa),                   // v->nb[2]
                  ggml_row_size(v->type, n_embd_v_gqa*kv_size),           // v->nb[3]
@@ -5117,7 +4916,7 @@ index 0d796d192..ea6e5822f 100644
      }
  
      // note: v->nb[1] > v->nb[2]
-@@ -2952,7 +3231,7 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
+@@ -3082,7 +3361,7 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
              ggml_row_size(v->type, kv_size*hparams.n_embd_head_v(il)),  // v->nb[1]
              ggml_row_size(v->type, kv_size),                        // v->nb[2]
              ggml_row_size(v->type, kv_size*n_embd_v_gqa),           // v->nb[3]
@@ -5125,8 +4924,8 @@ index 0d796d192..ea6e5822f 100644
 +            ggml_row_size(v->type, kv_size*n_embd_v_gqa)*sinfo.s0 + ggml_row_size(v->type, kv_start));
  }
  
- ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
-@@ -3194,6 +3473,8 @@ struct args_set_input_attn_mask {
+ static bool is_type_scaled(ggml_type type) {
+@@ -3348,6 +3627,8 @@ struct args_set_input_attn_mask {
  
      // every token of a sequence reuses the mask row of the first one (dspark draft blocks)
      bool block_uniform;
@@ -5135,7 +4934,7 @@ index 0d796d192..ea6e5822f 100644
  };
  
  template<typename T, bool causal, bool swa, bool is_2d, bool alibi>
-@@ -3210,6 +3491,7 @@ static void set_input_attn_mask_impl(const args_set_input_attn_mask & args, T *
+@@ -3364,6 +3645,7 @@ static void set_input_attn_mask_impl(const args_set_input_attn_mask & args, T *
      const int64_t n_kv     = args.n_kv;
      const int64_t n_stream = args.n_stream;
      const int64_t n_tps    = args.n_tps;
@@ -5143,7 +4942,7 @@ index 0d796d192..ea6e5822f 100644
  
      const int32_t * rows_all = args.rows;
  
-@@ -3299,8 +3581,8 @@ static void set_input_attn_mask_impl(const args_set_input_attn_mask & args, T *
+@@ -3453,8 +3735,8 @@ static void set_input_attn_mask_impl(const args_set_input_attn_mask & args, T *
                      }
                  }
  
@@ -5154,7 +4953,7 @@ index 0d796d192..ea6e5822f 100644
  
                  if (j < 0 || cells.is_empty(j)) {
                      goto skip;
-@@ -3402,7 +3684,7 @@ static void set_input_attn_mask_impl(const args_set_input_attn_mask & args, T *
+@@ -3556,7 +3838,7 @@ static void set_input_attn_mask_impl(const args_set_input_attn_mask & args, T *
      }
  }
  
@@ -5163,7 +4962,7 @@ index 0d796d192..ea6e5822f 100644
      // fill the cell rows of each slice
      if (attn_mask.rows && attn_mask.rows->buffer) {
          GGML_ASSERT(ggml_backend_buffer_is_host(attn_mask.rows->buffer));
-@@ -3461,7 +3743,9 @@ void llama_kv_cache::set_input_attn_mask(const llm_attn_mask & attn_mask, const
+@@ -3615,7 +3897,9 @@ void llama_kv_cache::set_input_attn_mask(const llm_attn_mask & attn_mask, const
              /*.n_tps            =*/ n_tps,
              /*.rows             =*/ rows,
              /*.block_uniform    =*/ attn_mask.block_uniform,
@@ -5173,7 +4972,7 @@ index 0d796d192..ea6e5822f 100644
  
          if (dst->type == GGML_TYPE_F16) {
              set_input_attn_mask_impl<ggml_fp16_t>(args, (ggml_fp16_t *) dst->data, causal_attn);
-@@ -4786,11 +5070,12 @@ bool llama_kv_cache_context::apply() {
+@@ -4940,12 +5224,13 @@ bool llama_kv_cache_context::apply() {
      kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
      n_kv      = kv->get_n_kv(sinfos[i_cur], ubatches[i_cur].n_tokens);
      n_kv_rows = kv->get_n_kv_rows(ubatches[i_cur]);
@@ -5181,13 +4980,14 @@ index 0d796d192..ea6e5822f 100644
  
      // wip/kv-residency (TODO #117): this is the last point before the graph is built, and `n_kv` is the PADDED
      // extent its views use -- so it is also exactly the extent the region must have mapped.  Growing to the
-     // used cells instead would leave a kernel reading unmapped VA (a GPU fault, not an error).
--    kv->grow_regions(n_kv);
-+    kv->grow_regions(kv_start + n_kv);
+     // used cells instead would leave a kernel reading unmapped VA (a GPU fault, not an error).  The used
+     // extent goes along as the windowed KV's spill boundary (issue #314 F7).
+-    kv->grow_regions(n_kv, kv->get_n_kv_used(sinfos[i_cur]));
++    kv->grow_regions(kv_start + n_kv, kv->get_n_kv_used(sinfos[i_cur]));
  
      return true;
  }
-@@ -4822,11 +5107,11 @@ ggml_type llama_kv_cache_context::type_v() const {
+@@ -4977,11 +5262,11 @@ ggml_type llama_kv_cache_context::type_v() const {
  }
  
  ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) const {
@@ -5200,8 +5000,8 @@ index 0d796d192..ea6e5822f 100644
 +    return kv->get_v(ctx, il, n_kv, sinfos[i_cur], kv_start);
  }
  
- ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
-@@ -4866,7 +5151,7 @@ void llama_kv_cache_context::set_input_v_idxs(ggml_tensor * dst, const llama_uba
+ ggml_tensor * llama_kv_cache_context::get_k_scale(int32_t il) const {
+@@ -5029,7 +5314,7 @@ void llama_kv_cache_context::set_input_v_idxs(ggml_tensor * dst, const llama_uba
  }
  
  void llama_kv_cache_context::set_input_attn_mask(const llm_attn_mask & attn_mask, const llama_ubatch * ubatch, bool causal_attn) const {
@@ -5211,7 +5011,7 @@ index 0d796d192..ea6e5822f 100644
  
  bool llama_kv_cache_context::kq_mask_derivable(const llama_ubatch & ubatch) const {
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 2976a0837..9a09710a8 100644
+index 62771f305..586ac5f16 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
 @@ -198,6 +198,30 @@ public:
@@ -5245,7 +5045,7 @@ index 2976a0837..9a09710a8 100644
      uint32_t get_n_seq_max() const;
      uint32_t get_n_stream() const;
  
-@@ -272,9 +296,14 @@ public:
+@@ -275,9 +299,14 @@ public:
      // padded length of the longest cell list of the slices; 0 if kv_rows are not used (multiple streams)
      uint32_t get_n_kv_rows(const llama_ubatch & ubatch) const;
  
@@ -5260,9 +5060,9 @@ index 2976a0837..9a09710a8 100644
 +    ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo, uint32_t kv_start = 0) const;
 +    ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo, uint32_t kv_start = 0) const;
  
-     // store k_cur and v_cur in the cache based on the provided head location
-     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
-@@ -316,7 +345,7 @@ public:
+     ggml_tensor * get_k_scale(int32_t il) const;
+     ggml_tensor * get_v_scale(int32_t il) const;
+@@ -322,7 +351,7 @@ public:
  
      void set_input_k_shift(ggml_tensor * dst) const;
  
@@ -5271,7 +5071,7 @@ index 2976a0837..9a09710a8 100644
      void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
  
      // V3 derived kq mask: true when the packed mask for this batch can be replaced by the compact
-@@ -468,6 +497,8 @@ private:
+@@ -479,6 +508,8 @@ private:
      // maps from a sequence id to a stream id
      std::vector<uint32_t> seq_to_stream;
  
@@ -5280,7 +5080,7 @@ index 2976a0837..9a09710a8 100644
      // pending stream copies that will be applied during the next update
      stream_copy_info sc_info;
  
-@@ -569,6 +600,7 @@ public:
+@@ -580,6 +611,7 @@ public:
  
      uint32_t get_n_kv() const;
      uint32_t get_n_kv_rows() const;
@@ -5288,7 +5088,7 @@ index 2976a0837..9a09710a8 100644
  
      // wip/kv-residency (TODO #118) B2: see llama_kv_cache::is_streaming
      bool is_streaming(uint32_t n_kv_asked) const;
-@@ -660,4 +692,5 @@ private:
+@@ -674,4 +706,5 @@ private:
  
      // see llama_kv_cache::get_n_kv_rows
      uint32_t n_kv_rows = 0;
@@ -5360,10 +5160,10 @@ index 44cc0be82..0d9afdd02 100644
      //const llama_model & model;
      const llama_hparams & hparams;
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index c19162f0b..eeb0cf43d 100644
+index 6c75ffea4..a0700ba67 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -2770,6 +2770,31 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -2933,6 +2933,31 @@ struct ggml_tensor * llama_model_loader::create_tensor(
              }
          }
  
@@ -5396,10 +5196,10 @@ index c19162f0b..eeb0cf43d 100644
          // EXCEPTION: a MoE expert weight (`MUL_MAT_ID`) that lands on a host buffer type stays in the
          // device's PINNED host buffer (`ROCm_Host`).  The expert cache reads the master in place on the
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 5c772ff61..4a5675c5e 100644
+index 77db3e01b..0790c40cb 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -1841,7 +1841,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1853,7 +1853,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
      // device) and there is no CPU split at all.  It is opt-in because the Meta-split GPU gather is
      // ~2.6% slower for MTP than the single-threaded CPU gather; the huge per-layer token embedding
      // stays host-resident either way (see create_tensor).
@@ -5410,7 +5210,7 @@ index 5c772ff61..4a5675c5e 100644
          pimpl->dev_input = get_layer_buft_list(n_layer_all);
      } else {
 diff --git a/src/llama-sampler.cpp b/src/llama-sampler.cpp
-index 0a29ce48c..211149ec4 100644
+index b12278874..df4d33735 100644
 --- a/src/llama-sampler.cpp
 +++ b/src/llama-sampler.cpp
 @@ -1421,6 +1421,33 @@ struct llama_sampler * llama_sampler_init_dist(uint32_t seed) {
@@ -5447,7 +5247,7 @@ index 0a29ce48c..211149ec4 100644
  void llama_sampler_backend_begin(llama_sampler * sampler) {
      GGML_ASSERT(sampler != nullptr);
  
-@@ -2770,6 +2797,17 @@ static struct llama_sampler_i llama_sampler_grammar_i = {
+@@ -2768,6 +2795,17 @@ static struct llama_sampler_i llama_sampler_grammar_i = {
      /* .copy_state        = */ nullptr,
  };
  
@@ -6002,7 +5802,7 @@ index f8a246421..807b76e80 100644
  
      ggml_tensor * inp_anchor = nullptr;
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index c00d19f4c..ece4e41ff 100644
+index a775d63ca..b6793fb35 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -185,6 +185,8 @@ llama_build(test-logits-width-probe.cpp)
@@ -7068,7 +6868,7 @@ index 000000000..b26ad9147
 +    return n_fail ? 1 : 0;
 +}
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 1eb864710..b2ed10f88 100644
+index 68b037da6..f276bb447 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -19,13 +19,23 @@
@@ -7103,7 +6903,7 @@ index 1eb864710..b2ed10f88 100644
      std::mt19937 spec_synth_rng;
  
      // TODO: move members that belong to the task (such as `generated`, `has_new_line`) to task_results_state
-@@ -3903,7 +3914,540 @@ private:
+@@ -3904,7 +3915,540 @@ private:
          return false;
      }
  
@@ -7644,7 +7444,7 @@ index 1eb864710..b2ed10f88 100644
  #ifdef DEBUG_TIMINGS
          static int64_t t_prev = 0;
          int64_t t_start = ggml_time_us();
-@@ -4283,9 +4827,26 @@ private:
+@@ -4284,9 +4828,26 @@ private:
  
          // generate the actual drafts (if any)
          if (!drafting.empty()) {
@@ -7671,7 +7471,7 @@ index 1eb864710..b2ed10f88 100644
          }
  
          // make checkpoints if needed
-@@ -5078,6 +5639,24 @@ private:
+@@ -5079,6 +5640,24 @@ private:
  
          // yield to the queue, so we can still handle metrics tasks while decoding
          // note: the sync is done here too, so that the wait is also covered by the yield
@@ -7696,7 +7496,7 @@ index 1eb864710..b2ed10f88 100644
          int ret = 0;
          queue_tasks.yield_to_queue([&]() {
              ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
-@@ -5085,6 +5664,7 @@ private:
+@@ -5086,6 +5665,7 @@ private:
                  llama_synchronize(ctx_tgt);
              }
          });
@@ -7704,7 +7504,7 @@ index 1eb864710..b2ed10f88 100644
  
          if (ret != 0) {
              {
-@@ -5144,9 +5724,30 @@ private:
+@@ -5145,9 +5725,30 @@ private:
          //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
          if (spec) {
              bool ok = true;
@@ -7735,7 +7535,7 @@ index 1eb864710..b2ed10f88 100644
  
              if (!ok) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
-@@ -5330,6 +5931,20 @@ private:
+@@ -5331,6 +5932,20 @@ private:
                  // drafters that fill no distribution fall back here
                  const bool use_rejection = slot.use_spec_rejection() && !slot.spec_draft_q.empty();
  
@@ -7756,7 +7556,7 @@ index 1eb864710..b2ed10f88 100644
                  std::vector<llama_token> accepted;
                  if (!synth_probs.empty()) {
                      // synthetic acceptance replaces verification entirely, so it comes first
-@@ -5345,6 +5960,27 @@ private:
+@@ -5346,6 +5961,27 @@ private:
                  }
  
                  GGML_ASSERT(accepted.size() >= 1);
@@ -7785,22 +7585,18 @@ index 1eb864710..b2ed10f88 100644
                  const uint32_t n_rollback = slot.spec_draft.size() + 1 - accepted.size();
  
 diff --git a/tools/server/server-queue.h b/tools/server/server-queue.h
-index 692255e4f..7f85f8996 100644
+index f9d66be64..640869d2e 100644
 --- a/tools/server/server-queue.h
 +++ b/tools/server/server-queue.h
-@@ -69,6 +69,12 @@ public:
-     // returns immediately if not sleeping
-     void wait_until_no_sleep();
+@@ -73,6 +73,11 @@ public:
  
+     // let the server sleep again once the caller no longer uses the server state
+     void release_inflight();
 +    // BigOne: a task is waiting to be processed (the GPU-resident loop ends so that the main loop handles it)
 +    bool has_pending() {
 +        std::unique_lock<std::mutex> lock(mutex_tasks);
 +        return !queue_tasks.empty();
 +    }
-+
+ 
      bool is_sleeping() {
          std::unique_lock<std::mutex> lock(mutex_tasks);
-         return sleeping;
--- 
-2.43.0
-
