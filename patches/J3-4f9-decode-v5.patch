@@ -1,5 +1,5 @@
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index 01768e94f..c56187e88 100644
+index 01768e94f..a69765f6a 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
 @@ -409,6 +409,7 @@ extern "C" {
@@ -18,7 +18,7 @@ index 01768e94f..c56187e88 100644
  
          GGML_OP_UNARY,
  
-@@ -2676,6 +2678,53 @@ extern "C" {
+@@ -2676,6 +2678,57 @@ extern "C" {
              int64_t               K,
              int64_t               n_rs_batch);
  
@@ -58,6 +58,10 @@ index 01768e94f..c56187e88 100644
 +            struct ggml_tensor  * fac_ids,
 +            struct ggml_tensor  * n_replay);
 +
++    // mark an anchored op (ggml_gated_delta_net_anchor[_rows]) whose final state nobody reads -- the next batch starts
++    // from its start state and replays all of its tokens -- so a backend may leave that part of the output unwritten
++    GGML_API void ggml_gated_delta_net_anchor_no_final(struct ggml_tensor * gdn);
++
 +    // the state after replaying the first n_replay[s] tokens of fac (from ggml_gated_delta_net_anchor) onto state:
 +    // [S_v, S_v, H_v, n_seqs].  fac is [n_fac, n_fac_tokens, n_seqs], n_replay I32 [n_seqs]
 +    GGML_API struct ggml_tensor * ggml_gated_delta_net_replay(
@@ -72,7 +76,7 @@ index 01768e94f..c56187e88 100644
      // DSA lightning indexer
      //
      // q:       [n_embd_idx, n_head_idx, n_batch, ne3 ]
-@@ -2808,6 +2857,19 @@ extern "C" {
+@@ -2808,6 +2861,19 @@ extern "C" {
              struct ggml_tensor  * inject,
              int64_t               hc);
  
@@ -427,10 +431,10 @@ index 000000000..294f4f7c8
 +
 +void ggml_cuda_op_dyn_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_delta_net.cu
-index ef62a001e..5064fe557 100644
+index ef62a001e..cad658c4f 100644
 --- a/ggml/src/ggml-cuda/gated_delta_net.cu
 +++ b/ggml/src/ggml-cuda/gated_delta_net.cu
-@@ -8,7 +8,26 @@
+@@ -8,7 +8,27 @@
  
  constexpr int gdn_cols_per_warp = 4;
  
@@ -449,6 +453,7 @@ index ef62a001e..5064fe557 100644
 +    int64_t         fac_stride = 0;       // floats between those rows
 +    int64_t         n_fac      = 0;
 +    int64_t         H_k        = 0;
++    bool            no_final   = false;   // the final state is not written (ggml_gated_delta_net_anchor_no_final)
 +};
 +
 +// nt: the input state is read and the per-token snapshots are written with non-temporal hints (same values).  A verify step
@@ -458,7 +463,7 @@ index ef62a001e..5064fe557 100644
  __global__ void __launch_bounds__((ggml_cuda_get_physical_warp_size() < S_v ? ggml_cuda_get_physical_warp_size() : S_v) * 4, 2)
  gated_delta_net_cuda(const float * q,
                                       const float * k,
-@@ -37,7 +56,9 @@ gated_delta_net_cuda(const float * q,
+@@ -37,7 +57,9 @@ gated_delta_net_cuda(const float * q,
                                       int           K,
                                       int           beta_sigmoid,
                                       const int32_t * s_ids,
@@ -469,7 +474,7 @@ index ef62a001e..5064fe557 100644
      const uint32_t h_idx    = blockIdx.x;
      const uint32_t sequence = blockIdx.y;
  
-@@ -80,7 +101,58 @@ gated_delta_net_cuda(const float * q,
+@@ -80,7 +102,58 @@ gated_delta_net_cuda(const float * q,
  #pragma unroll
      for (int r = 0; r < rows_per_lane; r++) {
          const int i = r * lanes_per_col + lane_in_col;
@@ -529,7 +534,7 @@ index ef62a001e..5064fe557 100644
      }
  
      for (int t = 0; t < n_tokens; t++) {
-@@ -109,6 +181,28 @@ gated_delta_net_cuda(const float * q,
+@@ -109,6 +182,28 @@ gated_delta_net_cuda(const float * q,
          if constexpr (!KDA) {
              const float g_val = expf(*g_t);
  
@@ -558,7 +563,7 @@ index ef62a001e..5064fe557 100644
              // kv[col] = (S^T @ k)[col] = sum_i S[i][col] * k[i]
              float kv_shard = 0.0f;
  #pragma unroll
-@@ -176,7 +270,11 @@ gated_delta_net_cuda(const float * q,
+@@ -176,22 +271,36 @@ gated_delta_net_cuda(const float * q,
  #pragma unroll
                  for (int r = 0; r < rows_per_lane; r++) {
                      const int i = r * lanes_per_col + lane_in_col;
@@ -571,7 +576,14 @@ index ef62a001e..5064fe557 100644
                  }
              }
          }
-@@ -186,12 +284,17 @@ gated_delta_net_cuda(const float * q,
+     }
+ 
++    if constexpr (anchor) {
++        if (aa.no_final) {
++            return;
++        }
++    }
+     if constexpr (!keep_rs_t) {
  #pragma unroll
          for (int r = 0; r < rows_per_lane; r++) {
              const int i          = r * lanes_per_col + lane_in_col;
@@ -591,7 +603,7 @@ index ef62a001e..5064fe557 100644
  static void launch_gated_delta_net(
          const float * q_d, const float * k_d, const float * v_d,
          const float * g_d, const float * b_d, const float * s_d,
-@@ -202,7 +305,8 @@ static void launch_gated_delta_net(
+@@ -202,7 +311,8 @@ static void launch_gated_delta_net(
          int64_t sb1,   int64_t sb2, int64_t sb3,
          int64_t neqk1, int64_t rq3,
          float scale, int64_t state_slot_stride, int K, int beta_sigmoid,
@@ -601,7 +613,7 @@ index ef62a001e..5064fe557 100644
      //TODO: Add chunked kernel for even faster pre-fill
      const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
      // four columns per warp (see the kernel); shrink the CTA when the wider CTA would leave
-@@ -223,29 +327,48 @@ static void launch_gated_delta_net(
+@@ -223,29 +333,48 @@ static void launch_gated_delta_net(
      const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(grid_dims, block_dims, 0, stream);
      switch (S_v) {
          case 16:
@@ -658,7 +670,7 @@ index ef62a001e..5064fe557 100644
              break;
          }
          default:
-@@ -316,7 +439,7 @@ int64_t ggml_cuda_gdn_bf16_head(const ggml_tensor * dst) {
+@@ -316,7 +445,7 @@ int64_t ggml_cuda_gdn_bf16_head(const ggml_tensor * dst) {
  
  static void ggml_cuda_op_gated_delta_net_impl(
          ggml_backend_cuda_context & ctx, ggml_tensor * dst, const ggml_cuda_gated_delta_net_fused_cache * cache,
@@ -667,7 +679,7 @@ index ef62a001e..5064fe557 100644
      // BigOne 6e (prefill): the conv left the normalized q / k in its own output (rows of C floats): read them there through
      // shallow copies of q, k and this node -- the same values, other addresses and token strides
      ggml_tensor dst_r, q_r, k_r;
-@@ -437,6 +560,43 @@ static void ggml_cuda_op_gated_delta_net_impl(
+@@ -437,6 +566,44 @@ static void ggml_cuda_op_gated_delta_net_impl(
      const int K = ggml_get_op_params_i32(dst, 0);
      const bool keep_rs = K > 1;
  
@@ -689,6 +701,7 @@ index ef62a001e..5064fe557 100644
 +        }
 +        aa.n_fac     = ggml_gated_delta_net_n_fac(S_v, H, nek0, nek1);
 +        aa.H_k       = nek1;
++        aa.no_final  = ggml_get_op_params_i32(dst, 3) == 1;
 +        aa.start_out = dst_d + S_v * H * n_tokens * n_seqs;
 +        aa.fac_out   = aa.start_out + 2 * D * n_seqs;
 +        float * final_out = aa.start_out + D * n_seqs;
@@ -711,7 +724,7 @@ index ef62a001e..5064fe557 100644
      // op param 1 is the widest per-seq batch the CALLER may roll back into (0 = unset).  It is NOT part
      // of the kernel-selection rule below: see the note on GDN_CHUNKED_MIN_TOKENS.  It is kept as the
      // census/diagnostic value and as a defensive floor for the whole-batch multi-seq path.
-@@ -684,14 +844,112 @@ void ggml_cuda_op_gated_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor *
+@@ -684,14 +851,115 @@ void ggml_cuda_op_gated_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor *
      ggml_cuda_op_gated_delta_net_impl(ctx, dst, nullptr);
  }
  
@@ -752,7 +765,8 @@ index ef62a001e..5064fe557 100644
 +}
 +
 +// anchored GDN -> cpy (start state, plane 1), cpy (final state, plane 0), set_rows (factors): the kernel writes the three
-+// straight into the cache; only views may sit between them
++// straight into the cache; only views may sit between them.  An op marked no_final (ggml_gated_delta_net_anchor_no_final)
++// has no final copy
 +int ggml_cuda_try_gdn_anchor_fusion(const ggml_cgraph * cgraph, int node_idx, ggml_cuda_gdn_anchor_cache & c) {
 +    const ggml_tensor * gdn = cgraph->nodes[node_idx];
 +    if (gdn->op != GGML_OP_GATED_DELTA_NET || ggml_get_op_params_i32(gdn, 2) != 1 || (gdn->flags & GGML_TENSOR_FLAG_OUTPUT)) {
@@ -788,7 +802,9 @@ index ef62a001e..5064fe557 100644
 +
 +    // the kernel also reads factor rows by id: with several sequences, one may read the row another writes (cells
 +    // swapped by find_slot), so there the factors keep their own set_rows and only the two state copies are fused
-+    const int n_fused = N == 1 ? 3 : 2;
++    const bool no_final = ggml_get_op_params_i32(gdn, 3) == 1;
++    const int  n_fused  = (N == 1 ? 3 : 2) - (no_final ? 1 : 0);
++    c.final      = nullptr;
 +    c.fac        = nullptr;
 +    c.fac_ids    = nullptr;
 +    c.fac_stride = 0;
@@ -801,7 +817,7 @@ index ef62a001e..5064fe557 100644
 +        }
 +        if (found == 0) {
 +            if ((c.start = state_dst(n, off_start)) == nullptr) { return why(n, "start"); }
-+        } else if (found == 1) {
++        } else if (found == 1 && !no_final) {
 +            if ((c.final = state_dst(n, off_final)) == nullptr) { return why(n, "final"); }
 +        } else {
 +            const ggml_tensor * src = n->src[0];
@@ -826,7 +842,7 @@ index ef62a001e..5064fe557 100644
  }
  
  
-@@ -701,7 +959,7 @@ int ggml_cuda_try_gdn_cache_fusion(
+@@ -701,7 +969,7 @@ int ggml_cuda_try_gdn_cache_fusion(
      const ggml_tensor * gdn = cgraph->nodes[node_idx];
      // the kernel skips the snapshot tail, so the gdn output must not be a graph output
      if (gdn->op != GGML_OP_GATED_DELTA_NET || gdn->type != GGML_TYPE_F32 ||
@@ -835,7 +851,7 @@ index ef62a001e..5064fe557 100644
          return 0;
      }
  
-@@ -781,6 +1039,12 @@ int ggml_cuda_gdn_beta_sigmoid_try_fuse(ggml_backend_cuda_context & ctx, const g
+@@ -781,6 +1049,12 @@ int ggml_cuda_gdn_beta_sigmoid_try_fuse(ggml_backend_cuda_context & ctx, const g
              cgraph->nodes[j]->src[2]->ne[2] <= 16 && cgraph->nodes[j]->src[2]->ne[3] == 1 &&
              ggml_node_get_use_count(cgraph, i) == 1 && !(node->flags & GGML_TENSOR_FLAG_OUTPUT)) {
          ggml_tensor * gdn = cgraph->nodes[j];
@@ -848,7 +864,7 @@ index ef62a001e..5064fe557 100644
          ggml_cuda_gated_delta_net_fused_cache fused_state_cpy;
          const int nodes_to_skip = disable_gdn_cpy ? 0 : ggml_cuda_try_gdn_cache_fusion(cgraph, j, fused_state_cpy);
          ggml_cuda_op_gated_delta_net_beta_sigmoid(ctx, gdn, node->src[0], nodes_to_skip > 0 ? &fused_state_cpy : nullptr);
-@@ -796,6 +1060,14 @@ int ggml_cuda_gdn_cache_cpy_try_fuse(ggml_backend_cuda_context & ctx, const ggml
+@@ -796,6 +1070,14 @@ int ggml_cuda_gdn_cache_cpy_try_fuse(ggml_backend_cuda_context & ctx, const ggml
      if (disable_gdn_cpy || node->op != GGML_OP_GATED_DELTA_NET) {
          return 0;
      }
@@ -2419,7 +2435,7 @@ index 9f5e22c1f..7d706722b 100644
      if (ncols < 1024) {
          launch(std::integral_constant<int, 256>{});
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index 20e812e09..2f2f2c3b2 100644
+index 20e812e09..60df2c49b 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
 @@ -1100,6 +1100,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
@@ -2472,7 +2488,7 @@ index 20e812e09..2f2f2c3b2 100644
  
  static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
  
-@@ -6896,6 +6900,117 @@ struct ggml_tensor * ggml_gated_delta_net(
+@@ -6896,6 +6900,122 @@ struct ggml_tensor * ggml_gated_delta_net(
      return result;
  }
  
@@ -2560,6 +2576,11 @@ index 20e812e09..2f2f2c3b2 100644
 +    return result;
 +}
 +
++void ggml_gated_delta_net_anchor_no_final(struct ggml_tensor * gdn) {
++    GGML_ASSERT(gdn->op == GGML_OP_GATED_DELTA_NET && ggml_get_op_params_i32(gdn, 2) == 1);
++    ggml_set_op_params_i32(gdn, 3, 1);
++}
++
 +struct ggml_tensor * ggml_gated_delta_net_replay(
 +        struct ggml_context * ctx,
 +        struct ggml_tensor  * state,
@@ -2590,7 +2611,7 @@ index 20e812e09..2f2f2c3b2 100644
  // ggml_lightning_indexer
  
  struct ggml_tensor * ggml_lightning_indexer(
-@@ -7212,6 +7327,35 @@ struct ggml_tensor * ggml_hc_combine(
+@@ -7212,6 +7332,35 @@ struct ggml_tensor * ggml_hc_combine(
      return result;
  }
  
@@ -2759,7 +2780,7 @@ index 3fa3d63b3..d82a10f5f 100644
      void set_extra_input(const llama_memory_recurrent_context * mctx_r);
  
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index 4048d27f5..0dd9e9574 100644
+index 4048d27f5..1eb45666d 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
 @@ -38,6 +38,42 @@ llama_memory_recurrent::llama_memory_recurrent(
@@ -2842,7 +2863,7 @@ index 4048d27f5..0dd9e9574 100644
          // the PLE history needs its own row: Meta must mirror it while the delta-net conv state next door stays split
          if (hparams.ple_conv_state() > 0 && hparams.is_ple(i)) {
              ggml_tensor * p = ggml_new_tensor_2d(ctx, type_r, hparams.ple_conv_state(), n_rows);
-@@ -131,6 +174,12 @@ llama_memory_recurrent::llama_memory_recurrent(
+@@ -131,6 +174,16 @@ llama_memory_recurrent::llama_memory_recurrent(
              this->n_rs_seq = 0;
              LLAMA_LOG_INFO("%s: disabling rollback snapshots because the memory module is empty\n", __func__);
          }
@@ -2850,12 +2871,16 @@ index 4048d27f5..0dd9e9574 100644
 +    }
 +
 +    if (anchor) {
-+        LLAMA_LOG_INFO("%s: anchored rollback (FRANK_RS_ANCHOR): 2 ssm state planes instead of %u, replay factors of %u tokens\n",
-+                __func__, 1 + n_rs_seq, fac_rows);
++        // FRANK_RS_REPLAY_ALL: on unless 0 (unset with FRANK_ALL=0: off)
++        const char * e = getenv("FRANK_RS_REPLAY_ALL");
++        const char * a = getenv("FRANK_ALL");
++        replay_all = e != nullptr ? atoi(e) != 0 : !(a != nullptr && a[0] == '0' && a[1] == '\0');
++        LLAMA_LOG_INFO("%s: anchored rollback (FRANK_RS_ANCHOR): 2 ssm state planes instead of %u, replay factors of %u tokens%s\n",
++                __func__, 1 + n_rs_seq, fac_rows, replay_all ? "; no final state, every batch replays (FRANK_RS_REPLAY_ALL)" : "");
      }
  
      {
-@@ -146,6 +195,12 @@ llama_memory_recurrent::llama_memory_recurrent(
+@@ -146,6 +199,12 @@ llama_memory_recurrent::llama_memory_recurrent(
      }
  }
  
@@ -2868,7 +2893,7 @@ index 4048d27f5..0dd9e9574 100644
  void llama_memory_recurrent::clear(bool data) {
      for (int32_t i = 0; i < (int32_t) size; ++i) {
          cells[i].pos = -1;
-@@ -153,6 +208,7 @@ void llama_memory_recurrent::clear(bool data) {
+@@ -153,6 +212,7 @@ void llama_memory_recurrent::clear(bool data) {
          cells[i].src = -1;
          cells[i].tail = -1;
          cells[i].rs_max = 0;
@@ -2876,7 +2901,7 @@ index 4048d27f5..0dd9e9574 100644
      }
  
      head = 0;
-@@ -220,7 +276,11 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
+@@ -220,7 +280,11 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
                  const llama_pos rollback = cell.pos - (p0 - 1);
                  // pending rollback is single-use
                  const bool pending = rs_idx[seq_id] != 0;
@@ -2889,7 +2914,7 @@ index 4048d27f5..0dd9e9574 100644
                      set_rs_idx(seq_id, (uint32_t) rollback);
                      cell.pos = p0 - 1;
                      return true;
-@@ -256,6 +316,7 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
+@@ -256,6 +320,7 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
                  }
                  cells[i].pos = -1;
                  cells[i].src = -1;
@@ -2897,7 +2922,7 @@ index 4048d27f5..0dd9e9574 100644
                  if (new_head == size) {
                      new_head = i;
                  }
-@@ -296,6 +357,7 @@ void llama_memory_recurrent::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id
+@@ -296,6 +361,7 @@ void llama_memory_recurrent::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id
              if (cell_dst.seq_id.empty()) {
                  cell_dst.pos = -1;
                  cell_dst.src = -1;
@@ -2905,7 +2930,7 @@ index 4048d27f5..0dd9e9574 100644
                  used -= 1;
              }
          }
-@@ -323,6 +385,7 @@ void llama_memory_recurrent::seq_keep(llama_seq_id seq_id) {
+@@ -323,6 +389,7 @@ void llama_memory_recurrent::seq_keep(llama_seq_id seq_id) {
  
              cells[i].pos = -1;
              cells[i].src = -1;
@@ -2913,7 +2938,7 @@ index 4048d27f5..0dd9e9574 100644
              cells[i].seq_id.clear();
  
              if (new_head == size){
-@@ -562,6 +625,12 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
+@@ -562,6 +629,12 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
      const uint32_t n_seq_tokens = ubatch.n_seq_tokens;
      const uint32_t n_seqs       = ubatch.n_seqs;
  
@@ -2926,7 +2951,7 @@ index 4048d27f5..0dd9e9574 100644
      // if we have enough unused cells before the current head ->
      //   better to start searching from the beginning of the cache, hoping to fill it
      if (head > used + 2*n_seqs) {
-@@ -603,6 +672,7 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
+@@ -603,6 +676,7 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
                      if (cell.seq_id.empty()) {
                          cell.pos = -1;
                          cell.src = -1;
@@ -2934,7 +2959,7 @@ index 4048d27f5..0dd9e9574 100644
                          used -= 1;
                      }
                  }
-@@ -661,6 +731,11 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
+@@ -661,6 +735,11 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
                  auto & orig_cell = cells[seq_meta.tail];
                  empty_cell.pos = orig_cell.pos;
                  empty_cell.src = orig_cell.src;
@@ -2946,7 +2971,7 @@ index 4048d27f5..0dd9e9574 100644
                  orig_cell.seq_id.erase(seq_id);
                  empty_cell.seq_id.insert(seq_id); // will be overwritten
                  GGML_ASSERT(!orig_cell.is_empty()); // has at least one remaining seq_id
-@@ -696,6 +771,10 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
+@@ -696,6 +775,10 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
              // snapshots of the state that lived there (r195 moves planes 1..n_rs_seq by index), so the
              // bound has to travel with pos/src/seq_id or a rollback after a move reads the wrong limit
              std::swap(dst_cell.rs_max, src_cell.rs_max);
@@ -2957,7 +2982,7 @@ index 4048d27f5..0dd9e9574 100644
  
              // swap tails
              for (uint32_t j = 0; j < size; ++j) {
-@@ -724,6 +803,11 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
+@@ -724,6 +807,11 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
          }
          cell.pos = last_pos;
          cell.rs_max = n_seq_tokens <= n_rs_seq + 1 ? n_seq_tokens - 1 : 0;
@@ -2969,7 +2994,7 @@ index 4048d27f5..0dd9e9574 100644
          cell.seq_id.clear();
          for (int32_t j = 0; j < ubatch.n_seq_id[i]; ++j) {
              const llama_seq_id seq_id = ubatch.seq_id[i][j];
-@@ -732,6 +816,22 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
+@@ -732,6 +820,22 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
          }
      }
  
@@ -2992,7 +3017,7 @@ index 4048d27f5..0dd9e9574 100644
      // Find first cell without src refs, to use as the zero-ed state
      {
          // TODO: bake-in src refcounts in the cell metadata
-@@ -833,6 +933,11 @@ size_t llama_memory_recurrent::size_p_bytes() const {
+@@ -833,6 +937,11 @@ size_t llama_memory_recurrent::size_p_bytes() const {
  void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
      GGML_UNUSED(flags);
  
@@ -3004,7 +3029,7 @@ index 4048d27f5..0dd9e9574 100644
      std::vector<std::pair<uint32_t, uint32_t>> cell_ranges; // ranges, from inclusive, to exclusive
      std::vector<std::pair<uint32_t, uint32_t>> cell_ranges_data; // logical source row ranges
      uint32_t cell_count = 0;
-@@ -847,7 +952,7 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
+@@ -847,7 +956,7 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
              ++cell_count;
              uint32_t rs_idx_cur = 0;
  
@@ -3013,7 +3038,7 @@ index 4048d27f5..0dd9e9574 100644
                  if (seq_id != -1) {
                      GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < rs_idx.size());
                      rs_idx_cur = rs_idx[seq_id];
-@@ -1152,6 +1257,8 @@ bool llama_memory_recurrent::state_read_meta(llama_io_read_i & io, uint32_t cell
+@@ -1152,6 +1261,8 @@ bool llama_memory_recurrent::state_read_meta(llama_io_read_i & io, uint32_t cell
          uint32_t cell_id = head + i;
          // make sure the recurrent states will keep their restored state
          cells[cell_id].src = cell_id;
@@ -3022,7 +3047,7 @@ index 4048d27f5..0dd9e9574 100644
      }
  
      return true;
-@@ -1330,6 +1437,124 @@ void llama_memory_recurrent::state_clear(llama_seq_id seq_id, uint32_t cell_head
+@@ -1330,6 +1441,130 @@ void llama_memory_recurrent::state_clear(llama_seq_id seq_id, uint32_t cell_head
      }
  }
  
@@ -3039,8 +3064,8 @@ index 4048d27f5..0dd9e9574 100644
 +        }
 +    }
 +
-+    if (r > 0) {
-+        // the start state of the last batch, with its accepted tokens replayed
++    if (r > 0 || (replay_all && cell.n_fac_prev > 0)) {
++        // the start state of the last batch, with its accepted tokens replayed (replay_all: plane 0 was not written)
 +        GGML_ASSERT(r <= cell.n_fac_prev);
 +        row      = (int32_t) size + src0;
 +        n_replay = (int32_t) (cell.n_fac_prev - r);
@@ -3073,7 +3098,10 @@ index 4048d27f5..0dd9e9574 100644
 +                seq = sid;
 +            }
 +        }
-+        if (r == 0) {
++        // replay_all: plane 0 is not written after a batch that keeps factors; replay them all into it and keep them (a
++        // rollback into the batch still reads plane 1 and the factors)
++        const bool fin = replay_all && r == 0 && cell.n_fac > 0;
++        if (r == 0 && !fin) {
 +            continue;
 +        }
 +        GGML_ASSERT(r <= cell.n_fac && cell.src == (int32_t) c);
@@ -3110,13 +3138,13 @@ index 4048d27f5..0dd9e9574 100644
 +            ggml_cgraph * gf = ggml_new_graph(ctx);
 +            ggml_build_forward_expand(gf, ggml_cpy(ctx, st, ggml_view_2d(ctx, s, s->ne[0], 1, s->nb[1], c * s->nb[1])));
 +            ggml_tensor * rl = r_l[il];
-+            if (rl != nullptr) {
++            if (rl != nullptr && r > 0) {   // r 0 (replay_all): the conv state is already in its plane 0
 +                ggml_build_forward_expand(gf, ggml_cpy(ctx,
 +                        ggml_view_2d(ctx, rl, rl->ne[0], 1, rl->nb[1], (r * size + c) * rl->nb[1]),
 +                        ggml_view_2d(ctx, rl, rl->ne[0], 1, rl->nb[1], c * rl->nb[1])));
 +            }
 +            ggml_tensor * pl = p_l[il];
-+            if (pl != nullptr) {
++            if (pl != nullptr && r > 0) {
 +                ggml_build_forward_expand(gf, ggml_cpy(ctx,
 +                        ggml_view_2d(ctx, pl, pl->ne[0], 1, pl->nb[1], (r * size + c) * pl->nb[1]),
 +                        ggml_view_2d(ctx, pl, pl->ne[0], 1, pl->nb[1], c * pl->nb[1])));
@@ -3135,6 +3163,9 @@ index 4048d27f5..0dd9e9574 100644
 +                GGML_ABORT("anchored rollback: a conv state without an ssm state is not handled");
 +            }
 +        }
++        if (fin) {
++            continue;
++        }
 +        for (const llama_seq_id sid : cell.seq_id) {
 +            if (sid >= 0 && (size_t) sid < rs_idx.size()) {
 +                self->rs_idx[sid] = 0;
@@ -3147,13 +3178,17 @@ index 4048d27f5..0dd9e9574 100644
  //
  // llama_memory_recurrent_context
  //
-@@ -1437,3 +1662,27 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
+@@ -1437,3 +1672,31 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
      }
      return (int32_t)(idx * mem->size) + src0;
  }
 +
 +bool llama_memory_recurrent_context::is_anchor() const {
 +    return mem->anchor;
++}
++
++bool llama_memory_recurrent_context::is_replay_all() const {
++    return mem->replay_all;
 +}
 +
 +uint32_t llama_memory_recurrent_context::get_n_fac() const {
@@ -3176,7 +3211,7 @@ index 4048d27f5..0dd9e9574 100644
 +    mem->anchor_input((uint32_t) i, row, n_replay, fac_src, fac_dst);
 +}
 diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
-index e0e0cfc71..44cc0be82 100644
+index e0e0cfc71..167bfd553 100644
 --- a/src/llama-memory-recurrent.h
 +++ b/src/llama-memory-recurrent.h
 @@ -28,7 +28,7 @@ public:
@@ -3188,7 +3223,7 @@ index e0e0cfc71..44cc0be82 100644
  
      //
      // llama_memory_i
-@@ -82,6 +82,15 @@ public:
+@@ -82,6 +82,19 @@ public:
      // per-seq rollback index
      std::vector<uint32_t> rs_idx;
  
@@ -3198,13 +3233,17 @@ index e0e0cfc71..44cc0be82 100644
 +    // rollback by r tokens is then the start state with the first n_fac - r tokens replayed; the conv state keeps its
 +    // per-token planes.
 +    bool     anchor   = false;
++    // FRANK_RS_REPLAY_ALL (on unless 0; anchored only): a batch that keeps factors does not write its final state, so plane 0 is
++    // only read after a batch that keeps none (a prefill, a restored state); the next batch starts from plane 1 and
++    // replays every accepted token, also when all were accepted (ggml_gated_delta_net_anchor_no_final)
++    bool     replay_all = false;
 +    uint32_t n_fac    = 0; // floats of one token's factors
 +    uint32_t fac_rows = 0; // tokens a factor row holds (n_rs_batch)
 +
      void set_rs_idx(llama_seq_id seq_id, uint32_t idx);
  
      // computed before each graph build
-@@ -100,6 +109,12 @@ public:
+@@ -100,6 +113,12 @@ public:
          // largest rollback whose snapshot the last ubatch guarantees: a ubatch of n <= n_rs_seq + 1 tokens
          // writes snapshots 0..n-1, a longer one only guarantees the final state (ggml_gated_delta_net)
          uint32_t rs_max = 0;
@@ -3217,7 +3256,7 @@ index e0e0cfc71..44cc0be82 100644
  
          std::set<llama_seq_id> seq_id;
  
-@@ -123,6 +138,15 @@ public:
+@@ -123,6 +142,15 @@ public:
      std::vector<ggml_tensor *> s_l;
      // a second conv history that must stay replicated across devices, so it cannot share the r row
      std::vector<ggml_tensor *> p_l;
@@ -3233,7 +3272,7 @@ index e0e0cfc71..44cc0be82 100644
  
  private:
      //const llama_model & model;
-@@ -133,6 +157,9 @@ private:
+@@ -133,6 +161,9 @@ private:
      // ggml contexts for the RS cache along with the allocated backend buffers:
      llama_memory_bufs ctxs_bufs;
  
@@ -3243,13 +3282,14 @@ index e0e0cfc71..44cc0be82 100644
      // true if no layers - can happen if the layer filter removes all layers
      bool is_empty() const;
  
-@@ -196,6 +223,14 @@ public:
+@@ -196,6 +227,15 @@ public:
      uint32_t get_n_rs_seq() const;
      int32_t  s_src(int i) const;
  
 +    // anchored rollback (llama_memory_recurrent::anchor), cell head + i: the ssm state row the batch starts from, how
 +    // many factors to replay onto it, the factor row it reads, and the factor row the batch writes
 +    bool is_anchor() const;
++    bool is_replay_all() const;
 +    uint32_t get_n_fac() const;
 +    uint32_t get_fac_rows() const;
 +    ggml_tensor * get_f_l(int32_t il) const;
@@ -3259,7 +3299,7 @@ index e0e0cfc71..44cc0be82 100644
      const llama_memory_status status;
  
 diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
-index d644b17bb..d1143fef6 100644
+index d644b17bb..cba66883a 100644
 --- a/src/models/delta-net-base.cpp
 +++ b/src/models/delta-net-base.cpp
 @@ -3,6 +3,8 @@
@@ -3291,7 +3331,7 @@ index d644b17bb..d1143fef6 100644
      // the GDN op only snapshots the per-token states (slots 0..n_seq_tokens-1), so a rollback that
      // removes the whole batch needs the pre-batch state: keep it in slot n_seq_tokens when it fits
      if (0 < n_seq_tokens && n_seq_tokens < K) {
-@@ -163,3 +171,119 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+@@ -163,3 +171,126 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
  
      return output;
  }
@@ -3381,7 +3421,14 @@ index d644b17bb..d1143fef6 100644
 +        ggml_tensor * fac_o  = ggml_view_2d(ctx0, gdn, n_fac * n_seq_tokens, n_seqs, ggml_row_size(gdn->type, n_fac * n_seq_tokens),
 +                ggml_row_size(gdn->type, n_attn + 2 * D * n_seqs));
 +        ggml_build_forward_expand(gf, ggml_cpy(ctx0, start, plane1));
-+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, fin,   plane0));
++        if (mctx_cur->is_replay_all()) {
++            // FRANK_RS_REPLAY_ALL: the next batch replays from plane 1 (llama_memory_recurrent::anchor_input), so the
++            // final state is not written
++            ggml_gated_delta_net_anchor_no_final(gdn);
++            GGML_UNUSED(fin);
++        } else {
++            ggml_build_forward_expand(gf, ggml_cpy(ctx0, fin, plane0));
++        }
 +        // the factor rows hold fac_rows tokens; this batch fills the first n_seq_tokens
 +        ggml_tensor * f_dst = ggml_view_2d(ctx0, f_all, n_fac * n_seq_tokens, f_all->ne[1], f_all->nb[1], 0);
 +        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, f_dst, fac_o, fac_dst));

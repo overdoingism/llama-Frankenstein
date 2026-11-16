@@ -24,7 +24,7 @@ are merged into seven groups, one patch each, numbered in the order of inference
 | J3 | decode / verify | 1-16 token matmuls; Gated DeltaNet draft verification with two state planes instead of one per draft token; fused decode ops; the draft model's output layer scored from an int2 copy, its best candidates recomputed exactly | speed/diff, memory, speed |
 | J4 | sampling | an end of turn sampled inside the reasoning becomes the reasoning's end tag | guard |
 | J5 | speculative decoding | the draft width from the acceptance, drafts of one length for slots verifying together, n-gram drafts from the prompt, an opt-in lenience for sampled drafts | speed, speed/trade-off, sampling |
-| J6 | step issue | the speculative loop on the GPU: sampling, draft acceptance and the next step's input on the device, two sequences in one step | speed |
+| J6 | step issue | the speculative loop on the GPU: sampling, draft acceptance and the next step's input on the device, two sequences in one step, each step checked by the host | speed, guard |
 | J7 | state between requests | prompt cache and context checkpoints in pinned memory, saved in the background, cut on the batch grid | speed |
 
 What each group contains, its switches, sources and references, the lossy parts with their KLD, and the change log:

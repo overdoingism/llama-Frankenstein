@@ -483,10 +483,10 @@ index c2a56fe83..b2cc7b7cf 100644
  // print statistics about the speculative decoding
 diff --git a/common/step-audit.cpp b/common/step-audit.cpp
 new file mode 100644
-index 000000000..5f21d63c7
+index 000000000..f2b465a6f
 --- /dev/null
 +++ b/common/step-audit.cpp
-@@ -0,0 +1,1813 @@
+@@ -0,0 +1,1913 @@
 +#include "step-audit.h"
 +#include "speculative.h"
 +
@@ -524,6 +524,7 @@ index 000000000..5f21d63c7
 +struct step_ring_entry {
 +    ggml_spec_seq seq[GGML_SPEC_MAX_SEQ];                         // the state after the step's acceptance
 +    int32_t       drafts[GGML_SPEC_MAX_SEQ * GGML_SPEC_MAX_ROW];  // the drafts it verified
++    int32_t       target[GGML_SPEC_MAX_SEQ * GGML_SPEC_MAX_ROW];  // FRANK_STEP_CHECK: the target's token of each row (argmax)
 +    int32_t       top;                                            // two sequences: the target cells' top after it
 +};
 +
@@ -554,6 +555,7 @@ index 000000000..5f21d63c7
 +    int64_t       n_resync = 0;
 +    int64_t       n_writes = 0;
 +    int32_t       rs_size  = 0;   // the target's recurrent cache cells (0: no recurrent inputs)
++    int32_t       rs_replay_all = 0;   // llama_step_rs_replay_all
 +    int64_t       n_kv     = 0;   // the KQ mask's cells in the last armed verify
 +
 +    // A5
@@ -625,6 +627,13 @@ index 000000000..5f21d63c7
 +    // up by it (one or two sequences): the cells come from ggml_spec_cells, each sequence has its own launch parameters
 +    int32_t               n_seq      = 1;
 +    bool                  cells_mode = false;
++    // FRANK_STEP_CHECK (step_loop_check): each sequence's state before the step being checked, the stop lists as the host
++    // set them, the counts, and a mismatch seen (the loop issues no more steps)
++    ggml_spec_seq         chk_prev[GGML_SPEC_MAX_SEQ] = {};
++    std::vector<int32_t>  stop_host[2];
++    int64_t               n_chk      = 0;
++    int64_t               n_chk_bad  = 0;
++    bool                  chk_halt   = false;
 +    ggml_tensor *         t_cells    = nullptr;   // ggml_spec_cells: the target's free cells as find_slot() hands them out
 +    int32_t               top_known  = 0;         // their top after the last waited step
 +    int32_t               cell_limit = 0;         // a step's cells must lie below this (the verify graph's cells)
@@ -742,6 +751,7 @@ index 000000000..5f21d63c7
 +    }
 +    if (a->rs_size > 0) {
 +        p.rs_size    = a->rs_size;
++        p.rs_replay_all = a->rs_replay_all;
 +        p.rs_s_copy  = (int32_t *) llama_step_input_device(ctx, "rs_s_copy#0");
 +        p.rs_rows    = (int32_t *) llama_step_input_device(ctx, "rs_a_rows#0");
 +        p.rs_replay  = (int32_t *) llama_step_input_device(ctx, "rs_a_replay#0");
@@ -798,6 +808,7 @@ index 000000000..5f21d63c7
 +    a->n_eog   = (int32_t) eog.size();
 +    a->write   = f_write;
 +    a->rs_size = llama_step_rs_size(ctx_tgt);
++    a->rs_replay_all = llama_step_rs_replay_all(ctx_tgt) ? 1 : 0;
 +    a->ctx_tgt = ctx_tgt;
 +    a->wdraft  = (spec_wdraft_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_spec_write_draft");
 +    a->walk    = (spec_walk_fn)   ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_spec_walk");
@@ -1087,6 +1098,7 @@ index 000000000..5f21d63c7
 +        ggml_backend_tensor_set(a->t_stop, v.data(), 0, v.size() * sizeof(int32_t));
 +    }
 +    a->n_stop = (int32_t) v.size();
++    a->stop_host[0] = v;
 +    return true;
 +}
 +
@@ -1104,6 +1116,7 @@ index 000000000..5f21d63c7
 +        ggml_backend_tensor_set(a->t_stop, v.data(), GGML_SPEC_MAX_STOP * sizeof(int32_t), v.size() * sizeof(int32_t));
 +    }
 +    a->n_stop1 = (int32_t) v.size();
++    a->stop_host[1] = v;
 +    return true;
 +}
 +
@@ -1413,6 +1426,7 @@ index 000000000..5f21d63c7
 +    }
 +    if (a->rs_size > 0) {
 +        w.rs_size    = a->rs_size;
++        w.rs_replay_all = a->rs_replay_all;
 +        w.rs_s_copy  = (int32_t *) step_loop_input(ct, 0, "rs_s_copy#0",    1, 1);
 +        w.rs_rows    = (int32_t *) step_loop_input(ct, 0, "rs_a_rows#0",    1, 1);
 +        w.rs_replay  = (int32_t *) step_loop_input(ct, 0, "rs_a_replay#0",  1, 1);
@@ -1728,6 +1742,7 @@ index 000000000..5f21d63c7
 +    }
 +    if (a->rs_size > 0) {
 +        w.rs_size    = a->rs_size;
++        w.rs_replay_all = a->rs_replay_all;
 +        w.rs_s_copy  = (int32_t *) step_loop_input(ct, 0, "rs_s_copy#0",    N, 1);
 +        w.rs_rows    = (int32_t *) step_loop_input(ct, 0, "rs_a_rows#0",    N, 1);
 +        w.rs_replay  = (int32_t *) step_loop_input(ct, 0, "rs_a_replay#0",  N, 1);
@@ -2126,9 +2141,88 @@ index 000000000..5f21d63c7
 +    return a == nullptr ? 0 : a->n_cpos;
 +}
 +
++// FRANK_STEP_CHECK (on unless 0): the host checks each loop step's result against the step before it -- the position moved
++// by the tokens emitted, the last token, the recurrent state's parity and rows -- and, for a greedy sequence without a
++// reasoning-guard replacement, the acceptance itself: the emitted tokens are the target's, the accepted drafts equal them,
++// and the step ended at the first draft that differs (or at an end of generation or a stop token).  A mismatch is logged and
++// the loop issues no more steps (the host takes the state again from the device, step_audit_follow).  The step's results
++// are already read back; the targets add N * W tokens to the same copy.
++static bool step_check_on() {
++    static const bool on = [] {
++        const char * e = getenv("FRANK_STEP_CHECK");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    return on;
++}
++
++static void step_loop_check(common_step_audit * a, int slot) {
++    const step_ring_entry & e = a->ring[slot];
++    const int W = a->n_row;
++    for (int k = 0; k < a->n_seq; ++k) {
++        const ggml_spec_seq & s = e.seq[k];
++        ggml_spec_seq &       p = a->chk_prev[k];
++        const bool greedy = a->cells_mode ? !a->temp_k[k] : !a->temp_mode;
++        const char * why = nullptr;
++        if (s.n_emit < 1 || s.n_emit > W) {
++            why = "the emitted count";
++        } else if (s.pos != p.pos + s.n_emit) {
++            why = "the position";
++        } else if (s.last != s.emit[s.n_emit - 1]) {
++            why = "the last token";
++        } else if (a->rs_size > 0 && (s.rs_fpar != (p.rs_fpar ^ 1) || s.n_row_prev != W || s.rs_cell != p.rs_cell)) {
++            why = "the recurrent state";
++        } else if (greedy && !s.guard_hit) {
++            const int32_t * t = e.target + (int64_t) k * W;
++            const int32_t * d = e.drafts + (int64_t) k * (W - 1);
++            for (int j = 0; j < s.n_emit && why == nullptr; ++j) {
++                if (s.emit[j] != t[j]) {
++                    why = "an emitted token is not the target's";
++                }
++            }
++            for (int j = 0; j + 1 < s.n_emit && why == nullptr; ++j) {
++                if (d[j] != t[j]) {
++                    why = "an accepted draft is not the target's";
++                }
++            }
++            const int j = s.n_emit - 1;
++            auto is_stop = [&](int32_t id) {
++                for (const auto & v : a->stop_host) {
++                    if (std::binary_search(v.begin(), v.end(), id)) {
++                        return true;
++                    }
++                }
++                return false;
++            };
++            if (why == nullptr && s.n_emit < W && d[j] == t[j] && !s.eog && !is_stop(t[j])) {
++                why = "the step ended at a draft equal to the target's";
++            }
++        }
++        a->n_chk++;
++        if (why != nullptr) {
++            a->n_chk_bad++;
++            if (a->n_chk_bad <= 20) {
++                LOG_WRN("%s: loop step %lld, sequence %d: %s (emitted %d, position %d after %d, last %d) -- the loop issues no more steps\n",
++                        __func__, (long long) a->n_done, k, why, s.n_emit, s.pos, p.pos, s.last);
++            }
++            a->chk_halt = true;
++        }
++        p = s;
++    }
++}
++
 +bool common_step_loop_issue(common_step_audit * a) {
 +    if (a == nullptr || !a->loop_on) {
 +        return false;
++    }
++    if (step_check_on()) {
++        if (a->n_issued == 0) {
++            // the state the first step starts from (common_step_loop_begin / _begin2 set it on the device)
++            ggml_backend_synchronize(a->backend);
++            ggml_backend_tensor_get(a->t_seq, a->chk_prev, 0, (size_t) a->n_seq * sizeof(ggml_spec_seq));
++            a->chk_halt = false;
++        } else if (a->chk_halt) {
++            return false;
++        }
 +    }
 +    const int32_t W = a->n_row;
 +    const int     N = a->n_seq;
@@ -2237,6 +2331,9 @@ index 000000000..5f21d63c7
 +    }
 +    ggml_backend_tensor_get_async(bt, a->t_seq, a->ring[slot].seq, 0, N * sizeof(ggml_spec_seq));
 +    ggml_backend_tensor_get_async(bt, a->t_walk, a->ring[slot].drafts, 0, (size_t) N * (W - 1) * sizeof(int32_t));
++    if (step_check_on()) {
++        ggml_backend_tensor_get_async(bt, a->t_target, a->ring[slot].target, 0, (size_t) N * W * sizeof(int32_t));
++    }
 +    if (a->cells_mode) {
 +        ggml_backend_tensor_get_async(bt, a->t_cells, &a->ring[slot].top, offsetof(ggml_spec_cells, top), sizeof(int32_t));
 +    }
@@ -2259,6 +2356,9 @@ index 000000000..5f21d63c7
 +    const int slot = (int) (a->n_done % 2);
 +    ggml_backend_event_synchronize(a->ev_host[slot]);
 +    a->n_done++;
++    if (step_check_on()) {
++        step_loop_check(a, slot);
++    }
 +    for (int k = 0; k < a->n_seq; ++k) {
 +        a->pos_known[k] = a->ring[slot].seq[k].pos;
 +    }
@@ -2287,9 +2387,9 @@ index 000000000..5f21d63c7
 +        last_exec[k] = a->ring[(a->n_issued - 1) % 2].seq[k];
 +    }
 +    if (a->n_loops % 16 == 1 || step_debug_level() >= 1) {
-+        LOG_INF("%s: %lld loops (%lld of two sequences), %lld device steps (%lld of two; this one %lld)\n", __func__,
++        LOG_INF("%s: %lld loops (%lld of two sequences), %lld device steps (%lld of two; this one %lld); host checks %lld, %lld mismatches\n", __func__,
 +                (long long) a->n_loops, (long long) a->n_loops2, (long long) a->n_loop_steps, (long long) a->n_loop2_steps,
-+                (long long) a->n_issued);
++                (long long) a->n_issued, (long long) a->n_chk, (long long) a->n_chk_bad);
 +    }
 +    return true;
 +}
@@ -2425,10 +2525,10 @@ index 000000000..1681c61c5
 +int64_t common_step_loop_n_cpos  (const common_step_audit * a);
 diff --git a/ggml/include/ggml-spec-step.h b/ggml/include/ggml-spec-step.h
 new file mode 100644
-index 000000000..4d673ba63
+index 000000000..5c2353393
 --- /dev/null
 +++ b/ggml/include/ggml-spec-step.h
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,254 @@
 +#pragma once
 +
 +// Device-side steps of a speculative-decoding loop that runs on the GPU without the host between
@@ -2643,6 +2743,7 @@ index 000000000..4d673ba63
 +    // the recurrent inputs, one per sequence (rs_size: the recurrent cache's cells).  Writing them advances the
 +    // state's parity and n_row_prev, so they are written once per verify.
 +    int32_t         rs_size;
++    int32_t         rs_replay_all;   // llama_step_rs_replay_all: every verify starts from plane 1
 +    int32_t       * rs_s_copy;
 +    int32_t       * rs_rows;
 +    int32_t       * rs_replay;
@@ -3035,10 +3136,10 @@ index 47077e0b6..9564b8c81 100644
      }
 diff --git a/ggml/src/ggml-cuda/spec-step.cu b/ggml/src/ggml-cuda/spec-step.cu
 new file mode 100644
-index 000000000..d8da07f14
+index 000000000..c3a311394
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/spec-step.cu
-@@ -0,0 +1,901 @@
+@@ -0,0 +1,903 @@
 +// Device-side steps of the GPU-resident speculative loop (ggml-spec-step.h).
 +//
 +// The acceptance follows common_sampler_sample_and_accept_n() with the greedy sampler, and the walk
@@ -3543,7 +3644,8 @@ index 000000000..d8da07f14
 +}
 +
 +// the recurrent inputs (llama_memory_recurrent::anchor_input and s_copy): a rollback of r rows of the last verify
-+// reads the state from the start of that verify (plane 1) and replays its accepted rows; the factor rows alternate
++// reads the state from the start of that verify (plane 1) and replays its accepted rows; the factor rows alternate.
++// rs_replay_all: plane 0 is not written, so also no rollback (r 0) reads plane 1 and replays all the rows
 +static __global__ void spec_write_rs(const ggml_spec_write_params p) {
 +    const int i = blockIdx.x * blockDim.x + threadIdx.x;
 +    if (i >= p.n_seq) {
@@ -3554,8 +3656,9 @@ index 000000000..d8da07f14
 +    const int32_t fpar_prev = s.rs_fpar;
 +    const int32_t fpar      = s.rs_fpar ^ 1;
 +    if (p.rs_s_copy)  p.rs_s_copy[i]  = r * p.rs_size + s.rs_src0;
-+    if (p.rs_rows)    p.rs_rows[i]    = r > 0 ? p.rs_size + s.rs_src0 : s.rs_src0;
-+    if (p.rs_replay)  p.rs_replay[i]  = r > 0 ? s.n_row_prev - r : 0;
++    const bool from1 = r > 0 || (p.rs_replay_all && s.n_row_prev > 0);
++    if (p.rs_rows)    p.rs_rows[i]    = from1 ? p.rs_size + s.rs_src0 : s.rs_src0;
++    if (p.rs_replay)  p.rs_replay[i]  = from1 ? s.n_row_prev - r : 0;
 +    if (p.rs_fac_src) p.rs_fac_src[i] = fpar_prev * p.rs_size + s.rs_src0;
 +    if (p.rs_fac_dst) p.rs_fac_dst[i] = fpar * p.rs_size + s.rs_cell;
 +    s.rs_fpar    = fpar;
@@ -3960,10 +4063,10 @@ index 000000000..cf2953e7e
 +void ggml_cuda_spec_suppress(cudaStream_t stream, float * x, int64_t n_rows, int64_t row_stride, const int32_t * ids, int32_t n_ids);
 +void ggml_cuda_spec_sample(ggml_cuda_pool & pool, cudaStream_t stream, const ggml_spec_sample_params & p);
 diff --git a/include/llama.h b/include/llama.h
-index 65f4e0f05..3b3d3e0e4 100644
+index 65f4e0f05..77c52dd49 100644
 --- a/include/llama.h
 +++ b/include/llama.h
-@@ -1264,6 +1264,73 @@ extern "C" {
+@@ -1264,6 +1264,76 @@ extern "C" {
      // returns NULL for invalid ids.
      LLAMA_API float * llama_get_logits_ith(struct llama_context * ctx, int32_t i);
  
@@ -3988,6 +4091,9 @@ index 65f4e0f05..3b3d3e0e4 100644
 +    LLAMA_API bool         llama_step_input_shape (struct llama_context * ctx, const char * key, int64_t ne[4]);
 +    // the number of cells of the context's recurrent state cache (0 if it has none)
 +    LLAMA_API int32_t      llama_step_rs_size     (struct llama_context * ctx);
++    // the recurrent state cache leaves plane 0 unwritten after a batch with factors, so the next batch always replays
++    // from plane 1 (FRANK_RS_REPLAY_ALL)
++    LLAMA_API bool         llama_step_rs_replay_all(struct llama_context * ctx);
 +    // the cells of the context's sliding-window KV cache (0 if it has none); in step mode it is a ring (pos mod size)
 +    LLAMA_API int32_t       llama_step_swa_size    (struct llama_context * ctx);
 +    // the last ubatch's h_nextn rows on the device (a DFlash2 drafter's lattice), valid until the next decode
@@ -4037,7 +4143,7 @@ index 65f4e0f05..3b3d3e0e4 100644
      // Get all output token embeddings.
      // when pooling_type == LLAMA_POOLING_TYPE_NONE or when using a generative model,
      // the embeddings for which llama_batch.logits[i] != 0 are stored contiguously
-@@ -1619,6 +1686,16 @@ extern "C" {
+@@ -1619,6 +1689,16 @@ extern "C" {
      /// seed == LLAMA_DEFAULT_SEED to use a random seed.
      LLAMA_API struct llama_sampler * llama_sampler_init_dist(uint32_t seed);
  
@@ -4067,7 +4173,7 @@ index 552915a68..d9535f5c2 100644
      llama-grammar.cpp
      llama-graph.cpp
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 458873bc7..0b3349a8c 100644
+index 458873bc7..1ce598083 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -13,6 +13,7 @@
@@ -4078,7 +4184,7 @@ index 458873bc7..0b3349a8c 100644
  #include "llama-kv-cache-iswa.h"
  #include "llama-mmap.h"
  #include "llama-model.h"
-@@ -1869,6 +1870,161 @@ float * llama_context::get_logits_ith(int32_t i) {
+@@ -1869,6 +1870,171 @@ float * llama_context::get_logits_ith(int32_t i) {
      }
  }
  
@@ -4128,6 +4234,16 @@ index 458873bc7..0b3349a8c 100644
 +        return (int32_t) recr->size;
 +    }
 +    return 0;
++}
++
++bool llama_context::step_rs_replay_all() const {
++    if (auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory.get())) {
++        return hybrid->get_mem_recr()->anchor && hybrid->get_mem_recr()->replay_all;
++    }
++    if (auto * recr = dynamic_cast<llama_memory_recurrent *>(memory.get())) {
++        return recr->anchor && recr->replay_all;
++    }
++    return false;
 +}
 +
 +llm_graph_result * llama_context::step_res(int32_t which) const {
@@ -4240,7 +4356,7 @@ index 458873bc7..0b3349a8c 100644
  float * llama_context::get_embeddings() {
      output_reorder();
  
-@@ -2920,6 +3076,31 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -2920,6 +3086,31 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
          // wip/moe-verify-fusions (narrow-2): route the MTP draft context's compute allocation to the
          // slab's pinned narrow-2 region (the reserve-time toggle in `graph_reserve` does not cover the
          // first `alloc_graph`).
@@ -4272,7 +4388,7 @@ index 458873bc7..0b3349a8c 100644
          const bool is_draft = cparams.ctx_other != nullptr;
          if (is_draft) {
              for (const auto & d : model.devices) {
-@@ -2940,6 +3121,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -2940,6 +3131,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
              ret = GGML_STATUS_ALLOC_FAILED;
              return nullptr;
          }
@@ -4284,7 +4400,7 @@ index 458873bc7..0b3349a8c 100644
  
          gf_res_prev_active = res;
      }
-@@ -2948,9 +3134,37 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -2948,9 +3144,37 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
      {
          //const auto t_start_us = ggml_time_us();
  
@@ -4322,7 +4438,7 @@ index 458873bc7..0b3349a8c 100644
          //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
      }
  
-@@ -3539,6 +3753,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+@@ -3539,6 +3763,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
          auto * t_embd    = cparams.embeddings       ? res->get_embd()     : nullptr;
          auto * t_h_nextn = cparams.embeddings_nextn ? res->get_h_nextn()  : nullptr;
  
@@ -4333,7 +4449,7 @@ index 458873bc7..0b3349a8c 100644
          if (t_embd && res->get_embd_pooled()) {
              t_embd = res->get_embd_pooled();
          }
-@@ -6634,6 +6852,113 @@ float * llama_get_logits(llama_context * ctx) {
+@@ -6634,6 +6862,117 @@ float * llama_get_logits(llama_context * ctx) {
      return ctx->get_logits();
  }
  
@@ -4366,6 +4482,10 @@ index 458873bc7..0b3349a8c 100644
 +
 +int32_t llama_step_rs_size(llama_context * ctx) {
 +    return ctx->step_rs_size();
++}
++
++bool llama_step_rs_replay_all(llama_context * ctx) {
++    return ctx->step_rs_replay_all();
 +}
 +
 +int32_t llama_step_swa_size(llama_context * ctx) {
@@ -4448,7 +4568,7 @@ index 458873bc7..0b3349a8c 100644
      ctx->synchronize();
  
 diff --git a/src/llama-context.h b/src/llama-context.h
-index aba46ec56..432602672 100644
+index aba46ec56..e08520f76 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -3,6 +3,7 @@
@@ -4459,7 +4579,7 @@ index aba46ec56..432602672 100644
  #include "llama-graph.h"
  #include "llama-adapter.h"
  #include "llama-impl.h"
-@@ -528,6 +529,35 @@ private:
+@@ -528,6 +529,36 @@ private:
      ggml_backend_t backend_cpu = nullptr;
      std::vector<ggml_backend_ptr> backends;
  
@@ -4480,6 +4600,7 @@ index aba46ec56..432602672 100644
 +    llama_step_slab * step_get_slab() { return step_slab.get(); }
 +    ggml_cgraph *     step_get_cur_gf() const { return step_cur_gf; }
 +    int32_t           step_rs_size() const;
++    bool              step_rs_replay_all() const;
 +    int32_t           step_swa_size() const;
 +    const float *     step_nextn_device(int64_t * n_embd, int64_t * n_rows) const;
 +    // phase B (llama.h): replay a held graph; its outputs and inputs on the device; the host's cache bookkeeping
@@ -5095,10 +5216,10 @@ index 62771f305..586ac5f16 100644
 +    uint32_t kv_start = 0;   // BigOne: the first cell of the KV range (llama_kv_cache::get_kv_start())
  };
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index 0dd9e9574..b95f3ab6e 100644
+index 1eb45666d..c207a06f7 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
-@@ -276,10 +276,8 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
+@@ -280,10 +280,8 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
                  const llama_pos rollback = cell.pos - (p0 - 1);
                  // pending rollback is single-use
                  const bool pending = rs_idx[seq_id] != 0;
@@ -5111,7 +5232,7 @@ index 0dd9e9574..b95f3ab6e 100644
                  if (!pending && rollback >= 1 && rollback <= bound) {
                      set_rs_idx(seq_id, (uint32_t) rollback);
                      cell.pos = p0 - 1;
-@@ -1463,6 +1461,32 @@ void llama_memory_recurrent::anchor_input(uint32_t i, int32_t & row, int32_t & n
+@@ -1467,6 +1465,32 @@ void llama_memory_recurrent::anchor_input(uint32_t i, int32_t & row, int32_t & n
      fac_dst = (int32_t) (cell.fpar * size + cell_idx);
  }
  
@@ -5145,10 +5266,10 @@ index 0dd9e9574..b95f3ab6e 100644
      // tiny graphs on the cache's own device: replay the start state of the cell's last batch into plane 0, copy the
      // conv state's rollback plane into its plane 0.  Only when a state is read with a rollback pending.
 diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
-index 44cc0be82..0d9afdd02 100644
+index 167bfd553..316e31e26 100644
 --- a/src/llama-memory-recurrent.h
 +++ b/src/llama-memory-recurrent.h
-@@ -148,6 +148,10 @@ public:
+@@ -152,6 +152,10 @@ public:
      // plane 0, so the state can be read without the factors (state_write)
      void anchor_commit(llama_seq_id seq_id) const;
  

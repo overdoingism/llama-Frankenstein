@@ -125,7 +125,7 @@ Batches of 1-16 tokens apart from attention.
 | part | what | switch | type |
 |---|---|---|---|
 | mmvk | Q4_K / Q5_K / Q6_K matmuls of 1-8 tokens keep the activations in registers across several weight rows; the matmuls that read one input go out as one launch.  On when llama-server verifies drafts | `FRANK_MMVK` (2) | speed/diff |
-| Gated DeltaNet verification | each slot keeps two recurrent-state planes (after its last batch, and the one that batch started from) and per-token replay factors instead of one full state per draft token; a partly rejected draft is replayed.  About 1 GiB less VRAM with 2 slots on Qwen3.8-27B.  The verify kernel reads and writes the state with non-temporal hints | `FRANK_RS_ANCHOR` (on), `FRANK_GDN_NT` (on) | memory, speed |
+| Gated DeltaNet verification | each slot keeps two recurrent-state planes (after its last batch, and the one that batch started from) and per-token replay factors instead of one full state per draft token; a partly rejected draft is replayed.  About 1 GiB less VRAM with 2 slots on Qwen3.8-27B.  After a verify batch the state after it is not written: the next batch always starts from the state the batch started from and replays the accepted tokens, also when all were accepted (0.1-0.5% less time per step).  The verify kernel reads and writes the state with non-temporal hints | `FRANK_RS_ANCHOR` (on), `FRANK_RS_REPLAY_ALL` (on), `FRANK_GDN_NT` (on) | memory, speed |
 | fused decode | the draft model's convolution, the Gated DeltaNet convolution state, the norm before quantization in registers, the output norm with the SiLU gate; one empty block against the gfx1201 grid stall on mmvk | switches in [SWITCHES.md](SWITCHES.md); `GGML_CUDA_GRID_STALL_PAD` (rdna-boosts') | speed |
 | int2 draft head | the DFlash2 draft model's output layer is scored from a resident int2 copy of its weight (asymmetric, 64 values per group); the best 512 of each column are recomputed through mmvk, bit for bit as the plain path computes them, and the rest are set to -inf.  When the true top 16 is not among the 512, only that draft changes, never the verified output.  About 2% less time per step and 0.4 GiB more VRAM (outside `--fit`; if it cannot be allocated the plain path stays).  On with one RDNA4 GPU | `FRANK_HEAD_INT2` (on) | speed |
 
@@ -182,7 +182,7 @@ How a step goes to the GPU.
 
 | part | what | switch | type |
 |---|---|---|---|
-| GPU-resident loop | with drafts, a step's sampling, draft acceptance (with J4's guard, J5's lenience and J3's verification), the next input and the KQ mask are made on the device; server requests and two sequences in one step run in it.  The host checks each step before the next is queued | `FRANK_STEP_LOOP` (on with one GPU, a ROCm one, on Linux and Windows; off with several GPUs), `FRANK_STEP_LOOP_SEQ2` (on), `FRANK_DEVICE_INPUT_MAPPED` (on); rdna-boosts' `LLAMA_DEVICE_INPUT` follows the loop when unset | speed |
+| GPU-resident loop | with drafts, a step's sampling, draft acceptance (with J4's guard, J5's lenience and J3's verification), the next input and the KQ mask are made on the device; server requests and two sequences in one step run in it.  The host checks every step it reads back (the position moved, the last token, the recurrent state's cell; for a greedy sequence also that the emitted tokens are the target's); on a mismatch the loop stops and the host path takes over | `FRANK_STEP_LOOP` (on with one GPU, a ROCm one, on Linux and Windows; off with several GPUs), `FRANK_STEP_LOOP_SEQ2` (on), `FRANK_DEVICE_INPUT_MAPPED` (on), `FRANK_STEP_CHECK` (on); rdna-boosts' `LLAMA_DEVICE_INPUT` follows the loop when unset | speed, guard |
 | graphs for wider verification | the host path also records verify batches of 9-16 tokens as HIP graphs | `FRANK_GRAPH_MAX_TOKENS` (16) | speed |
 
 The loop gives greedy output identical to the host path; at temperature > 0 the draft model's placement can change a token,
@@ -220,6 +220,12 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-17: J3 v5, J6 v8.**  J3: after a verify batch that keeps replay factors, the recurrent state after the
+batch is no longer written; the next batch always starts from the state the batch started from and replays the accepted
+tokens, also when all were accepted (`FRANK_RS_REPLAY_ALL`, on).  The same output, 0.1-0.5% less time per step.  J6: the
+loop's device-written inputs follow the same rule, and the host checks every loop step it reads back; on a mismatch it
+logs it, the loop issues no more steps and the host path takes over (`FRANK_STEP_CHECK`, on).  The same output and speed.
 
 **2026-11-17: J1 v4.1, J2 v7.1, J3 v4.1, J6 v7.1** on rdna-boosts `v16-4f9dfa0e3-r295` (llama.cpp `4f9dfa0e3`, the 1.0
 line); J4 v1, J5 v3 and J7 v1 move as they are.  Only what the new base needed: J1 includes `<mutex>` itself; J2's fp8
