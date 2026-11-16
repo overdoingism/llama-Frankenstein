@@ -1486,10 +1486,10 @@ index ee1fa9c8b..fc11242a1 100644
  
 diff --git a/ggml/src/ggml-cuda/lf-kq-blas.cu b/ggml/src/ggml-cuda/lf-kq-blas.cu
 new file mode 100644
-index 000000000..a58c79516
+index 000000000..a1b296d51
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/lf-kq-blas.cu
-@@ -0,0 +1,2492 @@
+@@ -0,0 +1,2635 @@
 +#include "lf-kq-blas.cuh"
 +#include "lf-mxfp4.cuh"
 +#include "convert.cuh"
@@ -2667,6 +2667,20 @@ index 000000000..a58c79516
 +};
 +std::map<cudaStream_t, lf_kq8_act> g_lf_kq8_acts;   // under lf_blt().mutex
 +
++// per stream: the weights converted ahead (FRANK_KQ_BLAS_PRECONV, see lf_kq8_preconv_on), one block per later reader of the input
++// whose activations are in the stream's lf_kq8_act; an entry is valid for its matmul node in the graph of generation gen
++struct lf_kq8_pre_entry { const ggml_tensor * mm; uint64_t gen; size_t off; };
++struct lf_kq8_pre {
++    char * ptr = nullptr; size_t size = 0;
++    std::vector<lf_kq8_pre_entry> e;
++    int hits = 0, used = 0, logged = 0;   // this graph's share hits, and those that took weights converted ahead
++    std::string missed;                   // the first few share hits without (for the log)
++};
++std::map<cudaStream_t, lf_kq8_pre> g_lf_kq8_pre;   // under lf_blt().mutex
++// the graph each device is computing (ggml_cuda_lf_kq_blas_graph_begin), and where its last K1 fp8 KEEP matmul was found
++struct lf_kq8_graph_ref { const ggml_cgraph * g = nullptr; int at = 0; uint64_t gen = 0; };
++std::map<int, lf_kq8_graph_ref> g_lf_kq8_graphs;   // under lf_blt().mutex
++
 +// the buffer of one input: [ xq T x Kp | sx | batch amax | kept channels k | channel amax K | channel -> slot K | top-k candidates ]
 +struct lf_kq8_act_layout {
 +    size_t o_sx, o_g, o_idx, o_cb, o_ps, o_cd, need;
@@ -3214,6 +3228,92 @@ index 000000000..a58c79516
 +#endif // defined(FRANK_HIPBLASLT)
 +}
 +
++#if defined(FRANK_HIPBLASLT)
++// FRANK_KQ_BLAS_PRECONV: improves reliability on Windows.
++// The matmuls of one graph that read the same input share its fp8 activations (FRANK_KQ_BLAS_SHARE); the later ones (share
++// hits) would convert their weights right after the previous matmul's GEMM.  With this on, the first matmul of the input, once
++// its activations are done, also converts the weights of the later readers (into a buffer of the stream), then its own, then
++// runs its GEMM; each later reader runs its GEMM on the weights converted ahead.  The same kernels with the same arguments in
++// another order: bit-identical.
++// Costs the buffer (the later readers' fp8 weights together: about 90 MiB for a 27B model's FFN up).
++// Unset or auto (the default) = on in a Windows build, off elsewhere; 1 = on; 0 = off.
++static bool lf_kq8_preconv_on() {
++    static const bool on = [] {
++        const char * e = getenv("FRANK_KQ_BLAS_PRECONV");
++#if defined(_WIN32)
++        const bool def = true;
++#else
++        const bool def = false;
++#endif
++        const bool v = (!e || strcmp(e, "auto") == 0) ? def : atoi(e) != 0;
++        GGML_LOG_INFO("FRANK_KQ_BLAS_PRECONV=%s: %s\n", e ? e : "auto",
++                      v ? "the weights of a share hit are converted with the first reader's" : "off");
++        return v;
++    }();
++    return on;
++}
++
++// the KEEP weight conversion of src0 into w8 (row stride K + 2 kk): one step from the quantized blocks, or (the first use, which
++// also takes the row scales, and types without a one-step kernel) dequantize to f16 in row chunks, then f16 -> fp8
++static void lf_kq8_keep_convert(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, float * scale, const bool first,
++        const uint8_t * posw, const int kk, uint8_t * w8, cudaStream_t stream) {
++    const int K = (int) src0->ne[0], M = (int) src0->ne[1], Kp = K + 2 * kk;
++    const lf_kq8_q_to_fp8_t one_step = first ? nullptr : lf_kq8_q_to_fp8_for(src0->type, K);
++    if (one_step) {
++        one_step(src0->data, scale, posw, kk, w8, K, Kp, (int64_t) M * K / QK_K, stream);
++        return;
++    }
++    const to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(src0->type);   // as in ggml_cuda_lf_kq_fp8_mul_mat
++    const int rows = (int) std::min<int64_t>(M, std::max<int64_t>(16, LF_KQ8_CHUNK_BYTES / (2ll * K)));
++    ggml_cuda_pool_alloc<half> w16(ctx.pool(), (size_t) rows * K);
++    for (int r0 = 0; r0 < M; r0 += rows) {
++        const int mc = std::min(rows, M - r0);
++        to_fp16((const char *) src0->data + (size_t) r0 * src0->nb[1], w16.get(), (int64_t) mc * K, stream);
++        if (first) lf_kq_row_scale<<<mc, 256, 0, stream>>>(w16.get(), K, scale + r0);
++        const int64_t n4 = (int64_t) mc * K / 4;
++        lf_kq8_f16_to_fp8_keep<<<(unsigned) ((n4 + 255) / 256), 256, 0, stream>>>(w16.get(), scale + r0, posw, kk,
++                                                                               w8 + (size_t) r0 * Kp, K, Kp, n4);
++    }
++}
++
++// the later readers of mm's input that will find its activations ready (mm has just quantized them): the K1 fp8 KEEP matmuls
++// after it reading the same input, up to the first K1 matmul of another input (it takes the stream's activation buffer; the
++// backend may have moved a reader well down the graph); only those whose weights have their row scales already (a first use
++// converts in two steps and takes them itself).  Under lf_blt().mutex.
++struct lf_kq8_later { const ggml_tensor * mm; float * scale; };
++static std::vector<lf_kq8_later> lf_kq8_later_readers(const int device, const ggml_tensor * mm, const ggml_tensor * x_src,
++        const int T, const int K, const int kk, const uint64_t gen) {
++    std::vector<lf_kq8_later> r;
++    auto gi = g_lf_kq8_graphs.find(device);
++    if (gi == g_lf_kq8_graphs.end() || gi->second.g == nullptr || gi->second.gen != gen) return r;
++    lf_kq8_graph_ref & gr = gi->second;
++    const int n = gr.g->n_nodes;
++    int i = -1;
++    for (int k = 0; k < n && i < 0; ++k) {   // the matmuls come in graph order: start where the last one was
++        const int j = (gr.at + k) % n;
++        if (gr.g->nodes[j] == mm) i = j;
++    }
++    if (i < 0) return r;
++    gr.at = i;
++    auto root = [](const ggml_tensor * t) { while (t->view_src != nullptr) t = t->view_src; return t; };
++    for (int j = i + 1; j < n; ++j) {
++        const ggml_tensor * t = gr.g->nodes[j];
++        if (t->op != GGML_OP_MUL_MAT || !ggml_cuda_lf_kq_blas_will_take(t)) continue;
++        const ggml_tensor * s0 = t->src[0], * s1 = t->src[1];
++        const int Tj = (int) (s1->ne[1] * s1->ne[2] * s1->ne[3]);
++        if (root(s1) != x_src || s1->data != mm->src[1]->data || Tj != T || s0->ne[0] != K || lf_kq_fp8_keep_for(K) != kk) break;
++        // ggml_cuda_lf_kq_blas_supported's conditions for the fp8 path
++        if (t->type != GGML_TYPE_F32 || !ggml_is_contiguous(s0) || !ggml_is_contiguous(s1) || !ggml_is_contiguous(t) ||
++            s1->ne[0] != K || t->ne[0] != s0->ne[1] || ggml_nrows(t) != T || ggml_get_to_fp16_cuda(s0->type) == nullptr) {
++            continue;
++        }
++        float * scale = lf_kq8_scale_lookup(s0, device);
++        if (scale != nullptr) r.push_back({ t, scale });
++    }
++    return r;
++}
++#endif // defined(FRANK_HIPBLASLT)
++
 +// K1 fp8 v3: the plain fp8 GEMM with the outlier channels' second fp8 term appended to K (see lf_kq_fp8_keep)
 +static void ggml_cuda_lf_kq_fp8_keep_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1,
 +        ggml_tensor * dst, const int kk, float * y, const float * c) {
@@ -3245,7 +3345,8 @@ index 000000000..a58c79516
 +    const ggml_tensor * x_src = src1;
 +    while (x_src->view_src != nullptr) x_src = x_src->view_src;
 +    const uint64_t gen = g_lf_fp8_graph_gen.load(std::memory_order_relaxed);
-+    if (!share || ac.x_src != x_src || ac.x_data != x || ac.T != T || ac.K != K || ac.k != kk || ac.gen != gen) {
++    const bool miss = !share || ac.x_src != x_src || ac.x_data != x || ac.T != T || ac.K != K || ac.k != kk || ac.gen != gen;
++    if (miss) {
 +        if (lf_kq8_fixed_cfg().mode == 2) {
 +            // BigOne 6d mode 2: a decode step locked this input -- its KEEP channels are the k largest channel amax of all its
 +            // calibration batches (the same top-k as a batch's)
@@ -3303,24 +3404,50 @@ index 000000000..a58c79516
 +    float * scale = lf_kq8_scale_lookup(src0, ctx.device);
 +    const bool first = scale == nullptr;
 +    if (first) CUDA_CHECK(cudaMalloc((void **) &scale, (size_t) M * sizeof(float)));
-+    ggml_cuda_pool_alloc<uint8_t> w8(ctx.pool(), (size_t) M * Kp);
-+    auto two_step = [&](uint8_t * dst) {   // as in ggml_cuda_lf_kq_fp8_mul_mat
-+        const int rows = (int) std::min<int64_t>(M, std::max<int64_t>(16, LF_KQ8_CHUNK_BYTES / (2ll * K)));
-+        ggml_cuda_pool_alloc<half> w16(ctx.pool(), (size_t) rows * K);
-+        for (int r0 = 0; r0 < M; r0 += rows) {
-+            const int mc = std::min(rows, M - r0);
-+            to_fp16((const char *) src0->data + (size_t) r0 * src0->nb[1], w16.get(), (int64_t) mc * K, stream);
-+            if (first) lf_kq_row_scale<<<mc, 256, 0, stream>>>(w16.get(), K, scale + r0);
-+            const int64_t n4 = (int64_t) mc * K / 4;
-+            lf_kq8_f16_to_fp8_keep<<<(unsigned) ((n4 + 255) / 256), 256, 0, stream>>>(w16.get(), scale + r0, posw, kk,
-+                                                                                   dst + (size_t) r0 * Kp, K, Kp, n4);
++    const uint8_t * w8p = nullptr;
++    if (share && lf_kq8_preconv_on()) {   // FRANK_KQ_BLAS_PRECONV
++        lf_kq8_pre & pr = g_lf_kq8_pre[stream];
++        if (miss) {
++            // the later readers of this input first, into the stream's buffer; then this matmul's own weights as before
++            pr.e.clear();
++            const std::vector<lf_kq8_later> later = lf_kq8_later_readers(ctx.device, dst, x_src, T, K, kk, gen);
++            size_t need = 0;
++            for (const lf_kq8_later & l : later) need += ((size_t) l.mm->src[0]->ne[1] * Kp + 255) / 256 * 256;
++            if (need > pr.size) {
++                if (pr.ptr) {
++                    CUDA_CHECK(cudaStreamSynchronize(stream));
++                    CUDA_CHECK(cudaFree(pr.ptr));
++                }
++                CUDA_CHECK(cudaMalloc((void **) &pr.ptr, need));
++                pr.size = need;
++                GGML_LOG_INFO("FRANK_KQ_BLAS_PRECONV: %.1f MiB for the weights converted ahead\n", need / 1048576.0);
++            }
++            size_t off = 0;
++            for (const lf_kq8_later & l : later) {
++                lf_kq8_keep_convert(ctx, l.mm->src[0], l.scale, false, posw, kk, (uint8_t *) pr.ptr + off, stream);
++                pr.e.push_back({ l.mm, gen, off });
++                off += ((size_t) l.mm->src[0]->ne[1] * Kp + 255) / 256 * 256;
++            }
++        } else {
++            ++pr.hits;
++            for (auto it = pr.e.begin(); it != pr.e.end(); ++it) {
++                if (it->mm == dst && it->gen == gen) {
++                    w8p = (const uint8_t *) pr.ptr + it->off;
++                    pr.e.erase(it);
++                    ++pr.used;
++                    break;
++                }
++            }
++            if (w8p == nullptr && pr.logged < 3 && pr.hits - pr.used <= 4) {
++                pr.missed += std::string(pr.missed.empty() ? "" : ", ") + dst->name;
++            }
 +        }
-+    };
-+    const lf_kq8_q_to_fp8_t one_step = first ? nullptr : lf_kq8_q_to_fp8_for(src0->type, K);
-+    if (one_step) {
-+        one_step(src0->data, scale, posw, kk, w8.get(), K, Kp, (int64_t) M * K / QK_K, stream);
-+    } else {
-+        two_step(w8.get());
++    }
++    ggml_cuda_pool_alloc<uint8_t> w8(ctx.pool());
++    if (w8p == nullptr) {
++        w8.alloc((size_t) M * Kp);
++        lf_kq8_keep_convert(ctx, src0, scale, first, posw, kk, w8.get(), stream);
++        w8p = w8.get();
 +    }
 +    if (first) {
 +        lf_kq_fp8_cache & c = lf_kq8();
@@ -3328,7 +3455,7 @@ index 000000000..a58c79516
 +        c.scale[{src0->data, src0->ne[0], src0->ne[1], ctx.device}] = scale;
 +    }
 +    const int otype = c == nullptr && y == (float *) dst->data ? lf_kq8_glu16_claim(dst, stream) : 0;   // BigOne GLU16
-+    if (lf_blt_gemm_q(ctx, st, scale, w8.get(), xq, sx, y, M, T, Kp, c, otype) != 0) {
++    if (lf_blt_gemm_q(ctx, st, scale, w8p, xq, sx, y, M, T, Kp, c, otype) != 0) {
 +        lf_kq8_glu16_written(dst, otype, stream);
 +    }
 +    CUDA_CHECK(cudaGetLastError());
@@ -3929,8 +4056,24 @@ index 000000000..a58c79516
 +void ggml_cuda_lf_kq_blas_graph_begin(const ggml_cgraph * cgraph) {
 +#if defined(FRANK_HIPBLASLT)
 +    g_lf_kq_graph_gen.fetch_add(1, std::memory_order_relaxed);
-+    g_lf_fp8_graph_gen.fetch_add(1, std::memory_order_relaxed);
++    const uint64_t gen8 = g_lf_fp8_graph_gen.fetch_add(1, std::memory_order_relaxed) + 1;
 +    lf_kq8_fixed_graph_begin(cgraph);   // BigOne 6d mode 2: an input is fixed at a decode step
++    {   // FRANK_KQ_BLAS_PRECONV: the graph for the look-ahead; the last graph's count, for the first few graphs with share hits
++        lf_blt_state & st = lf_blt();
++        std::lock_guard<std::mutex> lock(st.mutex);
++        g_lf_kq8_graphs[ggml_cuda_get_device()] = { cgraph, 0, gen8 };
++        for (auto & e : g_lf_kq8_pre) {
++            lf_kq8_pre & p = e.second;
++            if (p.hits > 0 && p.logged < 3) {
++                GGML_LOG_INFO("FRANK_KQ_BLAS_PRECONV: a graph with %d share hits, %d of them on weights converted ahead%s%s\n", p.hits,
++                              p.used, p.missed.empty() ? "" : "; without: ", p.missed.c_str());
++                ++p.logged;
++            }
++            p.hits = p.used = 0;
++            p.e.clear();
++            p.missed.clear();
++        }
++    }
 +#else
 +    GGML_UNUSED(cgraph);
 +#endif // defined(FRANK_HIPBLASLT)

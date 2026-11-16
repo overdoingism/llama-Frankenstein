@@ -220,6 +220,8 @@ to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
 
+**2026-11-16: J2 v7.**  Improves reliability on Windows.
+
 **2026-11-15: J6 v7.**  With two sequences in one step, the loop read each sequence's recurrent state from the cell its
 last host batch read, not the one it wrote.  When `find_slot()` swapped the two sequences' cells (two requests
 overlapping, as with `--parallel 2`), each sequence read the other's state and both answers turned to garbage; the loop
