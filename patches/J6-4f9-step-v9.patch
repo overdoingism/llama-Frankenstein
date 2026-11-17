@@ -5281,10 +5281,10 @@ index 167bfd553..316e31e26 100644
      //const llama_model & model;
      const llama_hparams & hparams;
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 6c75ffea4..a0700ba67 100644
+index 6c75ffea4..5b487b431 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -2933,6 +2933,31 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -2933,6 +2933,42 @@ struct ggml_tensor * llama_model_loader::create_tensor(
              }
          }
  
@@ -5300,7 +5300,18 @@ index 6c75ffea4..a0700ba67 100644
 +            const char * a = getenv("FRANK_ALL");
 +            return !(a != nullptr && a[0] == '0' && a[1] == '\0');
 +        }();
-+        if (dev_input_mapped && info.layer == LLM_TENSOR_LAYER_INPUT && tn.tensor == LLM_TENSOR_TOKEN_EMBD) {
++        // A tied token embedding -- the file has no output weight, so the arch loads the embedding a second time as the output
++        // (TENSOR_DUPLICATED) -- stays in the buffer type picked above, the output layer's: the duplicate then resolves to this
++        // same tensor, one copy in VRAM that both the GET_ROWS and the output matmul read.  In the mapped buffer it would be a
++        // second copy of the table, and the second of the two copies would read a file range the load has already released
++        // (LLAMA_LOAD_RELEASE_MMAP drops a range once its tensor is copied out).
++        const bool tied_embd = info.layer == LLM_TENSOR_LAYER_INPUT && tn.tensor == LLM_TENSOR_TOKEN_EMBD &&
++            get_weight(LLM_TN_IMPL(tn.arch, LLM_TENSOR_OUTPUT, "weight", -1, -1).str().c_str()) == nullptr;
++        if (dev_input_mapped && tied_embd) {
++            LLAMA_LOG_INFO("%s: %s is tied to the output layer: one copy in %s, not mapped (FRANK_DEVICE_INPUT_MAPPED)\n",
++                           __func__, tn.str().c_str(), ggml_backend_buft_name(buft));
++        }
++        if (dev_input_mapped && !tied_embd && info.layer == LLM_TENSOR_LAYER_INPUT && tn.tensor == LLM_TENSOR_TOKEN_EMBD) {
 +            ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
 +            if (dev != nullptr && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
 +                typedef ggml_backend_buffer_type_t (*mapped_buft_fn)(ggml_backend_dev_t);

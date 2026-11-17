@@ -186,7 +186,8 @@ How a step goes to the GPU.
 | graphs for wider verification | the host path also records verify batches of 9-16 tokens as HIP graphs | `FRANK_GRAPH_MAX_TOKENS` (16) | speed |
 
 The loop gives greedy output identical to the host path; at temperature > 0 the draft model's placement can change a token,
-as on the host path.
+as on the host path.  A tied token embedding (a model without an output weight) is not mapped: it stays in VRAM as the
+output layer, one copy for both.
 
 - References: the vLLM Gaudi plugin's documentation, "Bucketing mechanism" (lengths padded so a recorded graph is
   replayed; the loop's verify graphs span `FRANK_STEP_KV_HEADROOM` free cells for the same reason).  R. Hasan,
@@ -220,6 +221,11 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-18: J6 v9.**  A model without an output weight uses its token embedding as the output layer.  With the
+mapped token embedding (`FRANK_DEVICE_INPUT_MAPPED`, on with the loop) the two were placed apart: a second copy of the
+table, read from a file range the load had already released, and the load crashed (Gemma 4).  Such an embedding now stays
+in VRAM as the output layer, one copy for both.  Models with an output weight are unchanged (the same output).
 
 **2026-11-17: J3 v5, J6 v8.**  J3: after a verify batch that keeps replay factors, the recurrent state after the
 batch is no longer written; the next batch always starts from the state the batch started from and replays the accepted
