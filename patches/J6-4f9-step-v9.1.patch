@@ -11,10 +11,10 @@ index 688639a72..c0232f1dd 100644
      subproc.cpp
      subproc.h
 diff --git a/common/common.cpp b/common/common.cpp
-index 5097b921f..15160cc1e 100644
+index 85f19331f..1e859534b 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
-@@ -2185,6 +2185,13 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -2186,6 +2186,13 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.n_ctx             = params.n_ctx;
      cparams.n_seq_max         = params.n_parallel;
      cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
@@ -29,7 +29,7 @@ index 5097b921f..15160cc1e 100644
      // verify batch with more tokens than this cannot be rolled back into
      cparams.n_rs_batch        = std::max(1, common_speculative_n_max(&params.speculative) + 1);
 diff --git a/common/common.h b/common/common.h
-index 43bafa5a3..d6bff482a 100644
+index f12a02836..53ad2c4b6 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -77,7 +77,14 @@ struct common_cpu_params {
@@ -2784,10 +2784,10 @@ index 000000000..5c2353393
 +}
 +#endif
 diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
-index cdef3ce69..2e2863714 100644
+index caba01226..e0e06317d 100644
 --- a/ggml/src/ggml-cuda/common.cuh
 +++ b/ggml/src/ggml-cuda/common.cuh
-@@ -1771,6 +1771,8 @@ struct ggml_backend_cuda_context {
+@@ -1772,6 +1772,8 @@ struct ggml_backend_cuda_context {
      int                          splice_pin_idx = 0;
  
      cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {};
@@ -2797,7 +2797,7 @@ index cdef3ce69..2e2863714 100644
      void * cublas_workspaces[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {};
      size_t cublas_workspace_sizes[GGML_CUDA_MAX_DEVICES] = {};
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 47077e0b6..9564b8c81 100644
+index 29e1ba6ad..2402c745b 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -95,6 +95,7 @@
@@ -2808,7 +2808,7 @@ index 47077e0b6..9564b8c81 100644
  #include "ggml.h"
  
  #include <algorithm>
-@@ -1744,6 +1745,9 @@ struct ggml_backend_cuda_buffer_context {
+@@ -1748,6 +1749,9 @@ struct ggml_backend_cuda_buffer_context {
          size_t   dev_bytes;  // the unit-aligned VRAM watermark inside one stream of this tensor
      };
      std::vector<vmm_tens>  vmm_tensors;
@@ -2818,7 +2818,7 @@ index 47077e0b6..9564b8c81 100644
      std::string name;
  
      ggml_backend_cuda_buffer_context(int device, void * dev_ptr) :
-@@ -1761,6 +1765,10 @@ struct ggml_backend_cuda_buffer_context {
+@@ -1765,6 +1769,10 @@ struct ggml_backend_cuda_buffer_context {
              ggml_cuda_slab_work_release(device, slab_off, slab_need);   // the slab owns the region; the slack may go to the arena
              return;
          }
@@ -2829,7 +2829,7 @@ index 47077e0b6..9564b8c81 100644
          // A compute buffer allocated from the slab is a VIEW (handled above); everything else here is a
          // plain cudaMalloc pointer.
          CUDA_CHECK(cudaFree(dev_ptr));
-@@ -2836,6 +2844,126 @@ ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device) {
+@@ -2840,6 +2848,126 @@ ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device) {
      return &ggml_backend_cuda_buffer_types[device];
  }
  
@@ -2956,8 +2956,8 @@ index 47077e0b6..9564b8c81 100644
  // ------------------------------------------------------------------------------------------------
  // wip/kv-residency (TODO #117): the KV REGION buffer type -- provider P1 for the KV cache.
  //
-@@ -8829,9 +8957,37 @@ static bool ggml_cuda_graph_trace() {
-     return on;
+@@ -8865,8 +8993,25 @@ static int ggml_cuda_graph_max_tokens() {
+     return max_tokens;
  }
  
 +// The GPU-resident speculative loop's step graphs (llama_step_replay) keep their shape from step to step also above
@@ -2976,26 +2976,13 @@ index 47077e0b6..9564b8c81 100644
 +
  static bool ggml_cuda_graph_is_multi_token(const ggml_cgraph * cgraph) {
      static const bool verify_graphs_off = getenv("GGML_CUDA_DISABLE_VERIFY_GRAPHS") != nullptr;
--    return ggml_cuda_graph_n_tokens(cgraph) > (verify_graphs_off ? 1 : MMVQ_MAX_BATCH_SIZE);
 +    if (!verify_graphs_off && g_cuda_step_graph && ggml_cuda_step_graph_wide()) {
 +        return false;
 +    }
-+    // FRANK_GRAPH_MAX_TOKENS: the most tokens a graph may have and still be captured on the host path.  Unset: 16, so
-+    // the 9..16-token verifies (two slots, n-gram drafts) are captured too (copying -3.3 % per step, the same kernels);
-+    // MMVQ_MAX_BATCH_SIZE (8) with FRANK_ALL=0
-+    static const int max_tokens = [] {
-+        const char * e = getenv("FRANK_GRAPH_MAX_TOKENS");
-+        if (e != nullptr && atoi(e) >= 1) {
-+            return atoi(e);
-+        }
-+        const char * a = getenv("FRANK_ALL");
-+        return a != nullptr && a[0] == '0' && a[1] == '\0' ? MMVQ_MAX_BATCH_SIZE : 16;
-+    }();
-+    return ggml_cuda_graph_n_tokens(cgraph) > (verify_graphs_off ? 1 : max_tokens);
+     return ggml_cuda_graph_n_tokens(cgraph) > (verify_graphs_off ? 1 : ggml_cuda_graph_max_tokens());
  }
  
- // `GGML_CUDA_GRAPH_TRACE` also reports how each `graph_compute` call was served.  The distinction is
-@@ -12143,6 +12299,15 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -12254,6 +12399,15 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
  //   ggml_backend_cuda_kv_region_grow : int (*)(ggml_backend_buffer_t, uint32_t n_cells, uint32_t n_used)
  //                                      -- 1 ok, 0 n/a, -1 refused   (n_used = the unpadded extent: the
  //                                      window's spill boundary follows it, the MAPPING follows n_cells)
@@ -3011,7 +2998,7 @@ index 47077e0b6..9564b8c81 100644
  static ggml_backend_buffer_type_t ggml_backend_cuda_kv_region_buft_for_dev(ggml_backend_dev_t dev) {
      for (int i = 0; i < ggml_backend_cuda_get_device_count(); i++) {
          if (ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), i) == dev) {
-@@ -12162,8 +12327,102 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_kv_region_buft_split_for_dev
+@@ -12273,8 +12427,102 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_kv_region_buft_split_for_dev
      return nullptr;
  }
  
@@ -3114,7 +3101,7 @@ index 47077e0b6..9564b8c81 100644
      if (strcmp(name, "ggml_backend_cuda_kv_pool_mirror_buft") == 0) {
          return (void *) ggml_backend_cuda_kv_pool_mirror_buft_for_dev;
      }
-@@ -12173,6 +12432,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -12284,6 +12532,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_cuda_kv_region_buft") == 0) {
          return (void *) ggml_backend_cuda_kv_region_buft_for_dev;
      }
@@ -3124,7 +3111,7 @@ index 47077e0b6..9564b8c81 100644
      if (strcmp(name, "ggml_backend_cuda_kv_region_buft_split") == 0) {
          return (void *) ggml_backend_cuda_kv_region_buft_split_for_dev;
      }
-@@ -12199,6 +12461,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -12310,6 +12561,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_cuda_fattn_stage_bound") == 0) {
          return (void *) ggml_backend_cuda_fattn_stage_bound;
      }
@@ -4173,7 +4160,7 @@ index 552915a68..d9535f5c2 100644
      llama-grammar.cpp
      llama-graph.cpp
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 458873bc7..1ce598083 100644
+index 82ca434ac..c967add2c 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -13,6 +13,7 @@
@@ -4184,7 +4171,7 @@ index 458873bc7..1ce598083 100644
  #include "llama-kv-cache-iswa.h"
  #include "llama-mmap.h"
  #include "llama-model.h"
-@@ -1869,6 +1870,171 @@ float * llama_context::get_logits_ith(int32_t i) {
+@@ -2082,6 +2083,171 @@ float * llama_context::get_logits_ith(int32_t i) {
      }
  }
  
@@ -4356,7 +4343,7 @@ index 458873bc7..1ce598083 100644
  float * llama_context::get_embeddings() {
      output_reorder();
  
-@@ -2920,6 +3086,31 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -3133,6 +3299,31 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
          // wip/moe-verify-fusions (narrow-2): route the MTP draft context's compute allocation to the
          // slab's pinned narrow-2 region (the reserve-time toggle in `graph_reserve` does not cover the
          // first `alloc_graph`).
@@ -4388,7 +4375,7 @@ index 458873bc7..1ce598083 100644
          const bool is_draft = cparams.ctx_other != nullptr;
          if (is_draft) {
              for (const auto & d : model.devices) {
-@@ -2940,6 +3131,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -3153,6 +3344,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
              ret = GGML_STATUS_ALLOC_FAILED;
              return nullptr;
          }
@@ -4400,7 +4387,7 @@ index 458873bc7..1ce598083 100644
  
          gf_res_prev_active = res;
      }
-@@ -2948,9 +3144,37 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -3161,9 +3357,37 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
      {
          //const auto t_start_us = ggml_time_us();
  
@@ -4438,7 +4425,7 @@ index 458873bc7..1ce598083 100644
          //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
      }
  
-@@ -3539,6 +3763,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+@@ -3752,6 +3976,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
          auto * t_embd    = cparams.embeddings       ? res->get_embd()     : nullptr;
          auto * t_h_nextn = cparams.embeddings_nextn ? res->get_h_nextn()  : nullptr;
  
@@ -4449,7 +4436,7 @@ index 458873bc7..1ce598083 100644
          if (t_embd && res->get_embd_pooled()) {
              t_embd = res->get_embd_pooled();
          }
-@@ -6634,6 +6862,117 @@ float * llama_get_logits(llama_context * ctx) {
+@@ -6847,6 +7075,117 @@ float * llama_get_logits(llama_context * ctx) {
      return ctx->get_logits();
  }
  
@@ -5281,10 +5268,10 @@ index 167bfd553..316e31e26 100644
      //const llama_model & model;
      const llama_hparams & hparams;
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 6c75ffea4..5b487b431 100644
+index 6236cfdf5..101f8715b 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -2933,6 +2933,42 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -2947,6 +2947,42 @@ struct ggml_tensor * llama_model_loader::create_tensor(
              }
          }
  
@@ -5328,7 +5315,7 @@ index 6c75ffea4..5b487b431 100644
          // EXCEPTION: a MoE expert weight (`MUL_MAT_ID`) that lands on a host buffer type stays in the
          // device's PINNED host buffer (`ROCm_Host`).  The expert cache reads the master in place on the
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 77db3e01b..0790c40cb 100644
+index 50c89460d..168de24e7 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -1853,7 +1853,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
@@ -7000,7 +6987,7 @@ index 000000000..b26ad9147
 +    return n_fail ? 1 : 0;
 +}
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 68b037da6..f276bb447 100644
+index 5d6a7bb38..cbbb6e1aa 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -19,13 +19,23 @@
@@ -7035,7 +7022,7 @@ index 68b037da6..f276bb447 100644
      std::mt19937 spec_synth_rng;
  
      // TODO: move members that belong to the task (such as `generated`, `has_new_line`) to task_results_state
-@@ -3904,7 +3915,540 @@ private:
+@@ -4129,7 +4140,540 @@ private:
          return false;
      }
  
@@ -7576,7 +7563,7 @@ index 68b037da6..f276bb447 100644
  #ifdef DEBUG_TIMINGS
          static int64_t t_prev = 0;
          int64_t t_start = ggml_time_us();
-@@ -4284,9 +4828,26 @@ private:
+@@ -4509,9 +5053,26 @@ private:
  
          // generate the actual drafts (if any)
          if (!drafting.empty()) {
@@ -7603,7 +7590,7 @@ index 68b037da6..f276bb447 100644
          }
  
          // make checkpoints if needed
-@@ -5079,6 +5640,24 @@ private:
+@@ -5417,6 +5978,24 @@ private:
  
          // yield to the queue, so we can still handle metrics tasks while decoding
          // note: the sync is done here too, so that the wait is also covered by the yield
@@ -7628,7 +7615,7 @@ index 68b037da6..f276bb447 100644
          int ret = 0;
          queue_tasks.yield_to_queue([&]() {
              ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
-@@ -5086,6 +5665,7 @@ private:
+@@ -5424,6 +6003,7 @@ private:
                  llama_synchronize(ctx_tgt);
              }
          });
@@ -7636,7 +7623,7 @@ index 68b037da6..f276bb447 100644
  
          if (ret != 0) {
              {
-@@ -5145,9 +5725,30 @@ private:
+@@ -5483,9 +6063,30 @@ private:
          //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
          if (spec) {
              bool ok = true;
@@ -7667,7 +7654,7 @@ index 68b037da6..f276bb447 100644
  
              if (!ok) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
-@@ -5331,6 +5932,20 @@ private:
+@@ -5669,6 +6270,20 @@ private:
                  // drafters that fill no distribution fall back here
                  const bool use_rejection = slot.use_spec_rejection() && !slot.spec_draft_q.empty();
  
@@ -7688,7 +7675,7 @@ index 68b037da6..f276bb447 100644
                  std::vector<llama_token> accepted;
                  if (!synth_probs.empty()) {
                      // synthetic acceptance replaces verification entirely, so it comes first
-@@ -5346,6 +5961,27 @@ private:
+@@ -5684,6 +6299,27 @@ private:
                  }
  
                  GGML_ASSERT(accepted.size() >= 1);

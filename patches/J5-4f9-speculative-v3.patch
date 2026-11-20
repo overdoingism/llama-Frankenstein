@@ -1,8 +1,8 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index a982d077b..72ef77ec8 100644
+index 6dd53fbaa..d7a1f0e5a 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -4643,12 +4643,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -4664,12 +4664,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
      ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_TYPE"));
      add_opt(common_arg(
          {"--spec-ngram-mod-n-min"}, "N",
@@ -18,7 +18,7 @@ index a982d077b..72ef77ec8 100644
      ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 83aa5f12f..43bafa5a3 100644
+index 6736a6d34..f12a02836 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -302,6 +302,12 @@ struct common_params_sampling {
@@ -788,10 +788,10 @@ index 2404d8b2a..65f4e0f05 100644
      // WIP r42 (TODO #42): release the context's grow-only compute buffers so the next graph re-reserves
      // them from that graph.  Used to make the MTP draft context reserve lazily (after the target's
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index fa123b757..458873bc7 100644
+index 8f4d8cdb7..82ca434ac 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -6557,6 +6557,10 @@ uint32_t llama_n_ctx_seq(const llama_context * ctx) {
+@@ -6770,6 +6770,10 @@ uint32_t llama_n_ctx_seq(const llama_context * ctx) {
      return ctx->n_ctx_seq();
  }
  
@@ -803,7 +803,7 @@ index fa123b757..458873bc7 100644
      return ctx->n_batch();
  }
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 381546721..68b037da6 100644
+index fde85d966..5d6a7bb38 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -795,6 +795,14 @@ struct server_slot {

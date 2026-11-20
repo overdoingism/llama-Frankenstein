@@ -8,19 +8,21 @@ rdna-boosts paths, and only the parts outside them gain.
 | code from | license | what it gave |
 |---|---|---|
 | [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) | MIT | the engine |
-| [llama-cpp-rdna-boosts](https://github.com/stew675/llama-cpp-rdna-boosts) | MIT | the RDNA4 base these patches apply to; its decode-attention band and KQ block table (J1), grid-stall padding (J3) |
+| [llama-cpp-rdna-boosts](https://github.com/stew675/llama-cpp-rdna-boosts) | MIT | the RDNA4 base these patches apply to; its decode-attention band, KQ block table and the table's reuse across layers (J1), the GLU in place (J2), grid-stall padding (J3), graphs of up to 16 tokens (J6) |
 
 The papers each part follows, and thanks: [STRUCTURE.md](STRUCTURE.md).  Patches only; MIT.  Written with Claude (AI).
 
 ## Structure
 
 The main pipeline has been rebuilt.  This repo's earlier patches (0001-0015) and a new GPU-resident speculative pipeline
-are merged into seven groups, one patch each, numbered in the order of inference and applied in that order:
+are merged into seven groups, numbered in the order of inference.  Each is one patch, except J2, which is two (J2 v8 is
+both files): its part b is applied last, after J7, because it needs J4-J7's server and state code.  The order: J1, J2
+part a, J3, J4, J5, J6, J7, J2 part b.
 
 | group | part of the engine | what changes | type |
 |---|---|---|---|
 | J1 | attention | the full-attention layers' KV cache and every kernel that reads it: fp8 prefill attention, a `q8_0r` cache with a batch-invariant decode / verify kernel, 9-16 row verification through the decode kernel | speed/lossy, speed |
-| J2 | prefill | large-batch matmuls in fp8 through hipBLASLt (K-quant and MXFP4 weights), the GLU written in place, fused Gated DeltaNet prefill, the logits a prompt ends with from a decode-sized batch | speed/lossy, memory, speed, fix |
+| J2 | prefill | part a: large-batch matmuls in fp8 through hipBLASLt (K-quant and MXFP4 weights), fused Gated DeltaNet prefill, the logits a prompt ends with from a decode-sized batch; part b (applied last): K1's fp8 scales fixed for the normalized inputs after the first decode step (6d), an own WMMA f16 GEMM and an f16 batch for a long prompt's last tokens (both opt-in) | speed/lossy, memory, speed, fix |
 | J3 | decode / verify | 1-16 token matmuls; Gated DeltaNet draft verification with two state planes instead of one per draft token; fused decode ops; the draft model's output layer scored from an int2 copy, its best candidates recomputed exactly | speed/diff, memory, speed |
 | J4 | sampling | an end of turn sampled inside the reasoning becomes the reasoning's end tag | guard |
 | J5 | speculative decoding | the draft width from the acceptance, drafts of one length for slots verifying together, n-gram drafts from the prompt, an opt-in lenience for sampled drafts | speed, speed/trade-off, sampling |
@@ -54,6 +56,10 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
   which give the same bits.  Prompt processing: one 400-token batch, as in tools that score every token of a prompt (a
   reply's first token comes from a decode-sized batch: the prompt tail, J2).  Floor, generation: 0.0028 / 0.0008 (8K),
   0.0026 / 0.0004 (32K); prompt processing: 0.0079 / 0.0014 (8K), 0.0071 / 0.0007 (32K).
+- r327 (2026-11-21) added two defaults the table does not include: 6d (J2: K1's fp8 scales fixed for the normalized inputs
+  after the first decode step; prefill +1.6 / +2.1 / +1.2 % at 8K / 32K / 110K on UD-Q4_K_XL with 2 slots, KLD within
+  the floor of the per-batch scales on 22 kinds of content: [STRUCTURE.md](STRUCTURE.md#lossy-parts)) and rdna-boosts' KQ
+  block table reuse (J1, the same output).
 
 ### History
 
@@ -76,8 +82,8 @@ here.
 | what | pinned at |
 |---|---|
 | llama.cpp | commit `4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad` (the 1.0 line) |
-| llama-cpp-rdna-boosts | release `v16-4f9dfa0e3-r295`, commit `58184e329cc3de5b272ce9c6f77d04ecb8d44f16`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v16-4f9dfa0e3-r295` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
-| this repository | the seven patches in [`patches/`](patches), all of them, J1 to J7 in that order |
+| llama-cpp-rdna-boosts | release `v17-4f9dfa0e3-r327`, commit `8f349d0e71b236e081e28efa9eb9dca7f5ace945`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v17-4f9dfa0e3-r327` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
+| this repository | the eight patch files in [`patches/`](patches), all of them, in the order J1, J2 part a, J3 to J7, J2 part b |
 | ROCm | 10.0.0 with hipBLASLt, the HIP code compiled for gfx1201 |
 
 The method, the principles, a tree hash to check after each stage and the pitfalls, for Linux and Windows:
@@ -121,9 +127,9 @@ memory pressure, 23 stalls (1.16 s over 19 requests) became none, with the same 
 mmap) they count against the driver's limit.
 
 **Switches.**  Every part has an environment variable, read once at startup.  Everything is on by default, the lossy K1,
-F8 and M4 included (they are part of what the numbers above measure), except the parts marked opt-in.  `0` turns a part
-off; `FRANK_ALL=0` turns off every part that changes values or the order of work, and that build is the KLD reference
-above.  Every switch, its values and its default: [SWITCHES.md](SWITCHES.md).
+F8, M4 and 6d included (F8 and M4 are part of what the numbers above measure; 6d is newer), except the parts marked opt-in.
+`0` turns a part off; `FRANK_ALL=0` turns off every part that changes values or the order of work, and that build is the
+KLD reference above.  Every switch, its values and its default: [SWITCHES.md](SWITCHES.md).
 
 **What to check at run time:**
 

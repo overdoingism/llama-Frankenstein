@@ -1,5 +1,5 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 12a32b41e..a982d077b 100644
+index 1eee5cf7f..6dd53fbaa 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -284,6 +284,7 @@ const std::vector<ggml_type> kv_cache_types = {
@@ -64,7 +64,7 @@ index b65c6c137..e1896b320 100644
          .from_float               = quantize_row_q8_0,
          .vec_dot                  = ggml_vec_dot_q8_0_q8_0,
 diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
-index 2a68f252d..7b0fa1ea9 100644
+index 72e823847..626b294f8 100644
 --- a/ggml/src/ggml-cpu/ops.cpp
 +++ b/ggml/src/ggml-cpu/ops.cpp
 @@ -687,6 +687,7 @@ void ggml_compute_forward_add(
@@ -183,7 +183,7 @@ index f04be52f5..30d5c6f0e 100644
  void ggml_vec_dot_mxfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  void ggml_vec_dot_nvfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
-index 127a4a142..cdef3ce69 100644
+index e8fdd2569..caba01226 100644
 --- a/ggml/src/ggml-cuda/common.cuh
 +++ b/ggml/src/ggml-cuda/common.cuh
 @@ -1649,9 +1649,32 @@ void   ggml_cuda_h2d_ring_cap_set(size_t bytes);
@@ -406,71 +406,21 @@ index a8cf54eb5..b58e33c1a 100644
  
  // Each call dequantizes one super-block of QK_K values into y using the
 diff --git a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common.cuh
-index c3e32eeb6..1784d8fa7 100644
+index 07e37575b..ec39a51e7 100644
 --- a/ggml/src/ggml-cuda/fattn-common.cuh
 +++ b/ggml/src/ggml-cuda/fattn-common.cuh
-@@ -28,6 +28,14 @@ static inline bool ggml_cuda_fattn_kq_block_skip_enabled() {
+@@ -28,7 +28,7 @@ static inline bool ggml_cuda_fattn_kq_block_skip_enabled() {
      return enabled;
  }
  
-+// The packed bitmap (flash_attn_mask_to_KV_blocks) depends only on the mask and the tile shape.  The attention layers of
-+// one graph read the same mask, so the first one of a graph evaluation builds it into a buffer kept per context and the
-+// others reuse it (16 memset + prepass pairs per decode / verify step become one).  `key` packs the tile shape; `built` is
-+// set when the caller must build the bitmap into the returned buffer; nullptr: no reuse (build into the pool as before).
-+// ggml_cuda_fattn_new_graph_eval (fattn.cuh) starts a new evaluation.  FRANK_FA_KQ_BLOCKS_REUSE=0: build per layer.
-+uint32_t * ggml_cuda_fattn_kq_blocks_reuse(const ggml_backend_cuda_context & ctx, const ggml_tensor * mask, const int64_t key[8],
-+                                           size_t n_words, cudaStream_t stream, bool & built);
-+
- // Fully-masked KV-group skip in the decode/verify band (GGML_CUDA_FA_BAND_SKIP=0: off).  With a
- // unified KV cache a sequence's attention covers every cell up to its last one, including the other
- // slots' cells, which are -INF for this sequence; the band (n_q <= 8) used to read all of them on
-@@ -2203,21 +2211,29 @@ void launch_fattn(
-         const int64_t s33        = mask->nb[3] / sizeof(half);
- 
-         const int64_t n_words_total = int64_t(n_streams)*ntiles_x*words_per_tile;
--        kq_blocks.alloc(n_words_total);
--        CUDA_CHECK(cudaMemsetAsync(kq_blocks.ptr, 0, n_words_total*sizeof(uint32_t), main_stream));
--
--        constexpr int n_threads = 256;
--        const int64_t n_warps = int64_t(n_streams)*ntiles_x*n_groups;
--        const int n_blocks = (int) ((n_warps*WARP_SIZE + n_threads - 1) / n_threads);
--
--        ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(
--            dim3(n_blocks, 1, 1), dim3(n_threads, 1, 1), 0, main_stream);
--        ggml_cuda_kernel_launch(flash_attn_mask_to_KV_blocks<ncols1>, launch_params,
--            (const half *) mask->data, kq_blocks.ptr, n_kv, (int) Q->ne[1], s31, s33,
--            ntiles_x, n_groups, n_streams, n_mask_streams);
--        CUDA_CHECK(cudaGetLastError());
-+        const int64_t reuse_key[8] = { n_kv, Q->ne[1], s31, s33, ntiles_x, n_streams, n_mask_streams, ncols1 };
-+        bool built = true;
-+        uint32_t * blocks = ggml_cuda_fattn_kq_blocks_reuse(ctx, mask, reuse_key, (size_t) n_words_total, main_stream, built);
-+        if (blocks == nullptr) {
-+            kq_blocks.alloc(n_words_total);
-+            blocks = kq_blocks.ptr;
-+        }
-+        if (built) {
-+            CUDA_CHECK(cudaMemsetAsync(blocks, 0, n_words_total*sizeof(uint32_t), main_stream));
-+
-+            constexpr int n_threads = 256;
-+            const int64_t n_warps = int64_t(n_streams)*ntiles_x*n_groups;
-+            const int n_blocks = (int) ((n_warps*WARP_SIZE + n_threads - 1) / n_threads);
-+
-+            ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(
-+                dim3(n_blocks, 1, 1), dim3(n_threads, 1, 1), 0, main_stream);
-+            ggml_cuda_kernel_launch(flash_attn_mask_to_KV_blocks<ncols1>, launch_params,
-+                (const half *) mask->data, blocks, n_kv, (int) Q->ne[1], s31, s33,
-+                ntiles_x, n_groups, n_streams, n_mask_streams);
-+            CUDA_CHECK(cudaGetLastError());
-+        }
- 
--        kq_blocks_arg = kq_blocks.ptr;
-+        kq_blocks_arg = blocks;
-     }
- 
-     // The fully-masked KV-group bitmap's PACKED layout is indexed per (stream, query tile) with a word
+-// One packed bitmap per graph evaluation (GGML_CUDA_FA_KQ_BLOCKS_REUSE=1: opt-in, off by default).  The packed
++// One packed bitmap per graph evaluation (on by default in this patch set, GGML_CUDA_FA_KQ_BLOCKS_REUSE=0: off).  The packed
+ // bitmap above depends only on the mask's CONTENTS and the producer's arguments; every attention layer of one graph
+ // evaluation reads the same mask, so the first layer builds it into a buffer the context owns
+ // (ggml_backend_cuda_context::fattn_kq, 64 KiB on first use, freed with the context) and the other layers reuse it --
 diff --git a/ggml/src/ggml-cuda/fattn-q8r.cu b/ggml/src/ggml-cuda/fattn-q8r.cu
 new file mode 100644
-index 000000000..628ec562e
+index 000000000..19a905660
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/fattn-q8r.cu
 @@ -0,0 +1,601 @@
@@ -522,7 +472,7 @@ index 000000000..628ec562e
 +static constexpr float Q8R_TAU        = 8.0f;          // lazy rescale threshold (log2)
 +static constexpr float Q8R_LOG2E      = 1.4426950408889634f;
 +
-+uint32_t * ggml_cuda_fattn_kq_blocks_reuse(const ggml_backend_cuda_context & ctx, const ggml_tensor * mask, const int64_t key[8],
++uint32_t * ggml_cuda_fattn_kq_blocks_reuse(ggml_backend_cuda_context & ctx, const ggml_tensor * mask, const int64_t key[8],
 +                                           size_t n_words, cudaStream_t stream, bool & built);
 +
 +static bool q8r_on() {
@@ -1018,8 +968,8 @@ index 000000000..628ec562e
 +    float scale = 1.0f;
 +    memcpy(&scale, dst->op_params, sizeof(float));
 +
-+    // the groups masked for every query row of the op (shared by its attention layers; one bitmap for both launches of
-+    // 9..16 tokens)
++    // the groups masked for every query row of the op (one bitmap for both launches of 9..16 tokens; shared by its
++    // attention layers unless GGML_CUDA_FA_KQ_BLOCKS_REUSE=0)
 +    const uint32_t * skip = nullptr;
 +    ggml_cuda_pool_alloc<uint32_t> skip_buf(ctx.pool());
 +    const int n_groups = n_kv/256;
@@ -1090,21 +1040,19 @@ index 000000000..541c525a4
 +bool ggml_cuda_flash_attn_ext_q8r_applies(int cc, const ggml_tensor * dst);
 +void ggml_cuda_flash_attn_ext_q8r(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
-index 35ae5603b..f916129a2 100644
+index 5ca65b706..0a895be88 100644
 --- a/ggml/src/ggml-cuda/fattn.cu
 +++ b/ggml/src/ggml-cuda/fattn.cu
-@@ -4,6 +4,10 @@
+@@ -4,6 +4,8 @@
  #include "fattn-tile.cuh"
  #include "fattn-vec.cuh"
  #include "fattn.cuh"
 +#include "fattn-q8r.cuh"
 +#include "lf-fa-fp8.cuh"
-+
-+#include <mutex>
  
- #if !defined(GGML_USE_MUSA)
+ #include <cstring>
  
-@@ -646,7 +650,41 @@ static bool ggml_cuda_fattn_kv_type_supported(const ggml_type type) {
+@@ -660,7 +662,41 @@ static bool ggml_cuda_fattn_kv_type_supported(const ggml_type type) {
      }
  }
  
@@ -1146,7 +1094,7 @@ index 35ae5603b..f916129a2 100644
  #ifndef FLASH_ATTN_AVAILABLE
      GGML_UNUSED(device); GGML_UNUSED(dst);
      return BEST_FATTN_KERNEL_NONE;
-@@ -909,7 +947,9 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+@@ -923,7 +959,9 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
      GGML_ASSERT(K != nullptr);
      GGML_ASSERT(V != nullptr);
  
@@ -1157,7 +1105,7 @@ index 35ae5603b..f916129a2 100644
  
      bool need_f16_K = false;
      bool need_f16_V = false;
-@@ -958,9 +998,148 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+@@ -972,9 +1010,148 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
  }
  
  thread_local ggml_cuda_fa_had_req ggml_cuda_fa_had;
@@ -1306,99 +1254,25 @@ index 35ae5603b..f916129a2 100644
      switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
          case BEST_FATTN_KERNEL_NONE:
              GGML_ABORT("fatal error");
-@@ -990,3 +1169,81 @@ bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
-     }
-     return true;
+@@ -1022,10 +1199,17 @@ bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
+ // with a 25.7k-token parked slot) and expected to matter only where a launch is expensive (Windows/WDDM).  It is in
+ // the default set because it is exact and cheap (64 KiB, outside the pool, so --fit does not see it), not because it
+ // buys anything here; `patches/README.md` block 10 and WORKLOG 261120.004 carry that record.
++//
++// This patch set turns it ON by default (exact, so nothing to trade; +0.3 % decode measured on Windows/WDDM in the shape
++// above): GGML_CUDA_FA_KQ_BLOCKS_REUSE=0 turns it off, and so does FRANK_ALL=0 when the switch is unset.
+ static bool fattn_kq_blocks_reuse_on() {
+     static const bool on = []() {
+         const char * e = getenv("GGML_CUDA_FA_KQ_BLOCKS_REUSE");
+-        return e != nullptr && atoi(e) != 0;
++        if (e != nullptr) {
++            return atoi(e) != 0;
++        }
++        const char * a = getenv("FRANK_ALL");
++        return !(a != nullptr && a[0] == '0' && a[1] == '\0');
+     }();
+     return on;
  }
-+
-+// the packed KV-group bitmap shared by the attention layers of one graph evaluation (see fattn-common.cuh)
-+namespace {
-+struct fattn_kq_blocks_entry {
-+    uint64_t            eval    = 0;      // evaluation the bitmap was built in (0: none)
-+    const ggml_tensor * mask    = nullptr;
-+    const void *        data    = nullptr;
-+    int64_t             key[8]  = {};
-+    cudaStream_t        stream  = nullptr;
-+    uint32_t *          buf     = nullptr;
-+    size_t              cap     = 0;      // in words
-+};
-+std::mutex                                                             fattn_kq_blocks_mutex;
-+std::unordered_map<const ggml_backend_cuda_context *, uint64_t>              fattn_eval;
-+std::unordered_map<const ggml_backend_cuda_context *, fattn_kq_blocks_entry> fattn_kq_blocks;
-+
-+bool fattn_kq_blocks_reuse_on() {
-+    static const bool on = [] {
-+        const char * e = getenv("FRANK_FA_KQ_BLOCKS_REUSE");
-+        return e == nullptr || atoi(e) != 0;
-+    }();
-+    return on;
-+}
-+} // namespace
-+
-+void ggml_cuda_fattn_new_graph_eval(const ggml_backend_cuda_context & ctx) {
-+    if (!fattn_kq_blocks_reuse_on()) {
-+        return;
-+    }
-+    std::lock_guard<std::mutex> lock(fattn_kq_blocks_mutex);
-+    ++fattn_eval[&ctx];
-+}
-+
-+uint32_t * ggml_cuda_fattn_kq_blocks_reuse(const ggml_backend_cuda_context & ctx, const ggml_tensor * mask, const int64_t key[8],
-+                                           const size_t n_words, cudaStream_t stream, bool & built) {
-+    built = true;
-+    if (!fattn_kq_blocks_reuse_on()) {
-+        return nullptr;
-+    }
-+    std::lock_guard<std::mutex> lock(fattn_kq_blocks_mutex);
-+    const uint64_t eval = fattn_eval[&ctx];
-+    if (eval == 0) {
-+        return nullptr;
-+    }
-+    fattn_kq_blocks_entry & e = fattn_kq_blocks[&ctx];
-+    if (e.eval == eval && e.mask == mask && e.data == mask->data && e.stream == stream && memcmp(e.key, key, sizeof(e.key)) == 0) {
-+        built = false;
-+        return e.buf;
-+    }
-+    // another stream of this evaluation may still read the buffer: no reuse there
-+    if (e.eval == eval && e.stream != stream) {
-+        return nullptr;
-+    }
-+    if (e.buf == nullptr) {
-+        // one fixed buffer (captured graphs keep its address), never while a graph is captured
-+#if defined(GGML_USE_HIP)
-+        hipStreamCaptureStatus cs = hipStreamCaptureStatusNone;
-+        CUDA_CHECK(hipStreamIsCapturing(stream, &cs));
-+        if (cs != hipStreamCaptureStatusNone) {
-+            return nullptr;
-+        }
-+#elif defined(USE_CUDA_GRAPH)
-+        cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
-+        CUDA_CHECK(cudaStreamIsCapturing(stream, &cs));
-+        if (cs != cudaStreamCaptureStatusNone) {
-+            return nullptr;
-+        }
-+#endif
-+        e.cap = 16384;   // 64 KiB: a 2048-token batch at a 256K context needs ~8K words
-+        CUDA_CHECK(cudaMalloc((void **) &e.buf, e.cap * sizeof(uint32_t)));
-+    }
-+    if (n_words > e.cap) {
-+        return nullptr;
-+    }
-+    e.eval = eval; e.mask = mask; e.data = mask->data; e.stream = stream;
-+    memcpy(e.key, key, sizeof(e.key));
-+    return e.buf;
-+}
-diff --git a/ggml/src/ggml-cuda/fattn.cuh b/ggml/src/ggml-cuda/fattn.cuh
-index 70581659c..a074b6182 100644
---- a/ggml/src/ggml-cuda/fattn.cuh
-+++ b/ggml/src/ggml-cuda/fattn.cuh
-@@ -17,3 +17,6 @@ extern thread_local ggml_cuda_fa_had_req ggml_cuda_fa_had;
- bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst);
- 
- size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * dst);
-+
-+// a new graph evaluation: the attention layers' shared KV-group bitmap is rebuilt (fattn-common.cuh)
-+void ggml_cuda_fattn_new_graph_eval(const ggml_backend_cuda_context & ctx);
 diff --git a/ggml/src/ggml-cuda/getrows.cu b/ggml/src/ggml-cuda/getrows.cu
 index 16421bb49..df0c4b976 100644
 --- a/ggml/src/ggml-cuda/getrows.cu
@@ -1415,10 +1289,10 @@ index 16421bb49..df0c4b976 100644
              get_rows_cuda_kq<64, dst_t, dequantize_q2_K<dst_t>>(src0_d, src1_d, dst_d,
                  ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
 diff --git a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
-index e13528d03..8fc2b17f1 100644
+index 22df8b2df..2b2d33ca1 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
-@@ -1038,7 +1038,7 @@ static int ggml_cuda_rope_fwht_count(const ggml_cgraph * cgraph, const int i, co
+@@ -1056,7 +1056,7 @@ static int ggml_cuda_rope_fwht_count(const ggml_cgraph * cgraph, const int i, co
          const ggml_tensor * idx = sr->src[1];
          return view->op == GGML_OP_VIEW && view->type == GGML_TYPE_F32 && ggml_is_contiguous(view) &&
                 view->ne[0] == row_len && view->ne[1] == n_tok && view->ne[2] == 1 && view->ne[3] == 1 &&
@@ -1427,7 +1301,7 @@ index e13528d03..8fc2b17f1 100644
                 sr->ne[0] == row_len && sr->ne[2] == 1 && sr->ne[3] == 1 &&
                 idx->type == GGML_TYPE_I64 && ggml_is_contiguous(idx) && idx->ne[0] == n_tok && ggml_nelements(idx) == n_tok;
      };
-@@ -1216,7 +1216,7 @@ static int ggml_cuda_rms_norm_mul_rope_fwht_set_rows_count(const ggml_cgraph * c
+@@ -1234,7 +1234,7 @@ static int ggml_cuda_rms_norm_mul_rope_fwht_set_rows_count(const ggml_cgraph * c
          const ggml_tensor * idx = sr->src[1];
          return view->op == GGML_OP_VIEW && view->type == GGML_TYPE_F32 && ggml_is_contiguous(view) &&
                 view->ne[0] == row_len && view->ne[1] == n_tok && view->ne[2] == 1 && view->ne[3] == 1 &&
@@ -1437,10 +1311,10 @@ index e13528d03..8fc2b17f1 100644
                 idx->type == GGML_TYPE_I64 && ggml_is_contiguous(idx) && idx->ne[0] == n_tok && ggml_nelements(idx) == n_tok;
      };
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 46478c6f0..415661a35 100644
+index a65f0d804..66cb9764b 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -11128,6 +11128,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11184,6 +11184,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                      case GGML_TYPE_Q5_1:
                      case GGML_TYPE_Q8_0:
                      case GGML_TYPE_F8_E4M3:
@@ -1448,7 +1322,7 @@ index 46478c6f0..415661a35 100644
                      case GGML_TYPE_Q2_K:
                      case GGML_TYPE_Q3_K:
                      case GGML_TYPE_Q4_K:
-@@ -11162,7 +11163,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11218,7 +11219,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                             (
                                 (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 || op->type == GGML_TYPE_F8_E4M3 ||
                                 op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
@@ -1458,7 +1332,7 @@ index 46478c6f0..415661a35 100644
                                 op->src[0]->type == GGML_TYPE_F32
                             ) || (
                                 op->type == GGML_TYPE_F16 && op->src[0]->type == GGML_TYPE_F16
-@@ -11202,6 +11204,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11258,6 +11260,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                  if (src0_type == GGML_TYPE_Q8_0 && src1_type == GGML_TYPE_F32) {
                      return true;
                  }
@@ -2812,10 +2686,10 @@ index 8e2548dac..20e812e09 100644
          case GGML_TYPE_NVFP4:   result = quantize_nvfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
          case GGML_TYPE_F8_E4M3: result = quantize_f8_e4m3(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 0e2c63874..a7f5d3226 100644
+index 9a98670fd..1eec88776 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -6478,7 +6478,8 @@ llama_context * llama_init_from_model(
+@@ -6691,7 +6691,8 @@ llama_context * llama_init_from_model(
      }
  
      if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_k)) {
@@ -2825,7 +2699,7 @@ index 0e2c63874..a7f5d3226 100644
          for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
              if (model->hparams.n_embd_head_k(il) % blck_size != 0) {
                  LLAMA_LOG_ERROR("%s: K cache type %s with block size %u does not divide n_embd_head_k=%u\n",
-@@ -6489,7 +6490,8 @@ llama_context * llama_init_from_model(
+@@ -6702,7 +6703,8 @@ llama_context * llama_init_from_model(
      }
  
      if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_v)) {
@@ -2872,13 +2746,13 @@ index bd38e90fe..de203db7c 100644
              pl.inv    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, kv_pool_n_pages);
              pl.use    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, kv_pool_n_pages);
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 1c165cd41..33d9877a7 100644
+index 63bb2de9e..464917de7 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -11372,6 +11372,26 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
-     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_I64, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
-     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_I32, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
-     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_Q8_0, GGML_TYPE_I32, { 256, 5, 1, 3 }, { 1, 1, }, 1, false));
+@@ -11419,6 +11419,26 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+             }
+         }
+     }
 +    // q8_0r (BigOne's KV cache type, whole 256-value rows): its row ops and the flash attention over it (head 256, GQA 6)
 +    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_Q8_0R, GGML_TYPE_I64, { 256, 5, 1, 3 }, { 1, 1, }, 1, false));
 +    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_Q8_0R, GGML_TYPE_I64, { 256, 11, 1, 7 }, { 2, 3, }, 7, false));
@@ -2902,7 +2776,7 @@ index 1c165cd41..33d9877a7 100644
      for (ggml_type src_type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
          for (ggml_type type : all_types) {
              for (int b : {1, 7}) {
-@@ -13682,6 +13702,21 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -13746,6 +13766,21 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
          }
      }
  
@@ -2924,7 +2798,7 @@ index 1c165cd41..33d9877a7 100644
      // q8_0 KV cases: decode and prompt batches, KV pad, permuted KV, feature flags, and long context
      test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},   113,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
      test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},  1024,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
-@@ -14380,6 +14415,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+@@ -14444,6 +14479,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
          }
      }
  

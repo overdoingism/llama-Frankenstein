@@ -4,9 +4,12 @@ What each group in [`patches/`](patches) contains, its switches (default in brac
 from, the lossy parts with their KLD, and the change log.  The short table is in the [README](README.md#structure).
 Written with Claude (AI).
 
-The seven groups follow the order of inference, and each is one patch: `J<n>-4f9-<part>-v<version>.patch`, applied in
-number order on rdna-boosts `v16-4f9dfa0e3-r295`.  A group alone is not guaranteed to build; every part has a switch.  A
-version with a decimal (`v4.1`) is a group adapted to a new base, nothing else; its next change drops the decimal.
+The seven groups follow the order of inference.  Each is one patch, `J<n>-4f9-<part>-v<version>.patch`, except J2, which
+is two: `J2-4f9-prefill-a-v8.patch` and `J2-4f9-prefill-b-v8.patch` (J2 v8 is both).  They are applied in number order on
+rdna-boosts `v17-4f9dfa0e3-r327`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
+order: J1 attention v4.2, J2 prefill-a v8, J3 decode v5.1, J4 sampling v1, J5 speculative v3, J6 step v9.1, J7 state v1.2,
+J2 prefill-b v8.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
+a group adapted to a new base, nothing else; its next change drops the decimal.
 
 Types: `speed` = faster, the same output; `memory` = less VRAM, the same output; `speed/diff` = faster, output not
 bit-identical to the stock code but within the run-to-run floor; `speed/lossy` = faster, error above the floor;
@@ -19,14 +22,14 @@ KLD as multiples of the run-to-run floor (zh / en): Qwen3.8-27B official UD-Q5_K
 48K-token prefix, against the same build with every switch off.  Generation = the largest of the decode / verify widths 1, 6
 and 16; prompt processing = one 400-token batch.  Floor: generation 0.0017 / 0.0005, prompt processing 0.0057 / 0.0011.
 Speed: the part against the defaults without it (prefill t/s gained; decode time per step saved), 8K / 32K / 110K prompts.
-Measured 2026-11-09 on r235 with a 48K prefix; the defaults on r269 at 8K and 32K: the README's
-[Performance](README.md#performance).
+Measured 2026-11-09 on r235 with a 48K prefix, before 6d was a default (6d: below); the defaults on r269 at 8K and 32K:
+the README's [Performance](README.md#performance).
 
 | part | group | KLD, generation | KLD, prompt processing | speed |
 |---|---|---|---|---|
 | K1 (fp8 prefill matmuls) | J2 | 1.42× / 1.72× | 4.01× / 4.35× | prefill +115 / +107 / +83 % |
 | F8 (fp8 prefill attention) | J1 | 1.05× / 1.18× | 1.19× / 1.52× | prefill +12 / +29 / +65 % |
-| fixed KEEP + 16-bit GLU input (off by default) | J2 | within K1's | within K1's | prefill +1 / +7 / +6 % |
+| 6d, fixed scales of the normalized inputs (on by default from r327) | J2 | within the floor (below) | — | prefill +1.6 / +2.1 / +1.2 % |
 | M4 (MXFP4 weights only) | J2 | 0.0021 / 0.0009 (absolute) | 0.0126 / 0.0035 (absolute) | prefill +69 / +66 / +53 % |
 | mmvk | J3 | 0.82× / 0.59× | 0 | per step −6.5 / −8.2 / −6.1 % |
 | 9-16 row verification | J1 | 0.92× / 1.06× | 0 | copying with a `q8_0` cache: per step −12 % (32K), −29 % (110K) |
@@ -38,6 +41,16 @@ token does not come from there: the prompt tail (J2) computes the logits a promp
 hybrid model with context checkpoints already ends its prompt with a small batch).  The column applies to tools that score
 every token of a prompt (perplexity); later tokens read the prompt through the KV cache and see the generation column.  For
 prompt scoring set `FRANK_KQ_BLAS=f16` (K1's matmuls in f16: slower, much smaller error).
+
+**6d (J2, on by default from r327)** was measured another way: the KLD against K1 `f16` on 22 kinds of content (400
+tokens each), as a multiple of the default fp8's (per-batch scales), against the floor of the default fp8 run at another
+batch split (`-ub 1024`), after a 3,000-token prefix.  With only the normalized residual streams fixed, every kind's KLD
+stayed within that floor, also when the scales were fixed on hexdump, base64 or emoji first; so did top-1 agreement but
+in one case (hexdump after fixing on classical Chinese poetry: 4.25 points lower; f16 at another batch split moves
+hexdump's by 1.75).  qgate passes (zh 1.23×, en 1.19× its floor).  Fixing every K1 input (the earlier opt-in 6d) made
+some kinds of content much worse: on hexdump a KLD 10-50× the per-batch default's and top-1 agreement 4.5-8.75 points
+lower.  Speed: prefill +1.6 / +2.1 / +1.2 % at 8K / 32K / 110K against the per-batch default (27B UD-Q4_K_XL, 2 slots),
+measured 2026-11-21 on r324; decode does not reach K1.
 
 **Lenience (J5, sampling, off by default)** changes the rule that accepts sampled drafts, not the logits, so it has no
 KLD of the kind above.  Its effect on the sampled distribution can be computed exactly at every verified position: at
@@ -54,9 +67,9 @@ The KV cache of the full-attention layers and every kernel that reads it, for pr
 | F8 | prefill flash attention in fp8 on RDNA4, from a `q8_0` or `q8_0r` cache: batches of 32 tokens or more over 512 KV cells or more; no growing f16 staging copy.  The row sum is counted from the rounded fp8 probabilities (numerator and denominator from the same numbers); barriers order LDS only; WMMAs of two accumulators issued in turn where measured faster | `FRANK_FA_FP8` (on) | speed/lossy |
 | `q8_0r` cache | a KV type whose rows hold 256 8-bit codes followed by their 8 scales, written in the same kernel as the KV store, and its own decode / verify kernel: one pass over the KV for the whole GQA group, the split points fixed (they do not move with the KV length or the number of queries), so decode and verification of the same token give the same numbers; every wave loads KV | `-ctk q8_0r -ctv q8_0r`; `FRANK_FA_Q8R` (on) | speed/diff |
 | 9-16 row verification | with a `q8_0` cache, a verify batch of 9-16 query rows (two slots verifying at once, a long n-gram draft) runs as two halves through the RDNA4 decode band instead of the generic kernel, from 8192 KV cells.  Each row gets the result a batch of 8 rows or fewer gives | `FRANK_FA_BAND_SPLIT` (on), `_MIN_KV` (8192) | speed/diff |
-| shared KQ block table | the attention layers of one graph share the mask's block table | `FRANK_FA_KQ_BLOCKS_REUSE` (on) | speed |
+| shared KQ block table | the attention layers of one graph evaluation share the mask's block table: rdna-boosts' (r327), opt-in there, on by default here | `GGML_CUDA_FA_KQ_BLOCKS_REUSE` (on) | speed |
 
-- Code: rdna-boosts (MIT): the decode band's group walk and barrier, the KQ block table.
+- Code: rdna-boosts (MIT): the decode band's group walk and barrier, the KQ block table and its reuse.
 - References: J. Shah, G. Bikshandi, Y. Zhang, V. Thakkar, P. Ramani, T. Dao, "FlashAttention-3: Fast and Accurate
   Attention with Asynchrony and Low-precision", NeurIPS 2024, arXiv:2407.08608, §3.3, and Colfax Research, "Delivering
   1 PFLOP/s of Performance with FP8 FlashAttention-2", 2024 (both attention matmuls in fp8, the probabilities rounded to
@@ -80,25 +93,30 @@ The KV cache of the full-attention layers and every kernel that reads it, for pr
 
 ## J2 prefill
 
-The large-batch path apart from attention.
+The large-batch path apart from attention.  Part a holds everything but 6d, the own f16 GEMM and the tail batch, which are
+part b.  The GLU in place is rdna-boosts' since r323 (`GGML_GLU_INPLACE`).
 
 | part | what | switch | type |
 |---|---|---|---|
-| K1 | prefill matmuls of K-quant weights through hipBLASLt in fp8 (or f16), on batches of 384 tokens or more (f16: 640; 1024 on weights under 20M elements); the largest activation channels of each batch get a second fp8 term for their rounding errors in the same GEMM; the residual ADD goes into the GEMM (in f16 too, unless the algorithms are timed) | `FRANK_KQ_BLAS` (`fp8` when every GPU is a gfx1201), `_FP8_KEEP` (64), `_ADD` (on); `FRANK_DRAFT_UB` (512) | speed/lossy |
-| fixed KEEP, 16-bit GLU input | K1's outlier channels and fp8 scales are fixed from each input's first batches, so producers write fp8 activations directly; the gate / up GEMM writes 16-bit output for the GLU.  Off by default: faster, but the added error showed in our evaluations | `FRANK_KQ_BLAS_FIXED` (0; 1 = after `_N` (4) batches, 2 = at the first decode step), `FRANK_KQ_BLAS_GLU16` (off; `f16`) | speed/lossy |
+| K1 | prefill matmuls of K-quant weights through hipBLASLt in fp8 (or f16), on batches of 384 tokens or more (f16: 640; 1024 on weights under 20M elements); the largest activation channels of each batch get a second fp8 term for their rounding errors in the same GEMM; the residual ADD goes into the GEMM (in f16 too, unless the algorithms are timed) | `FRANK_KQ_BLAS` (`fp8` when every GPU is a gfx1201), `_FP8_KEEP` (64), `_ADD` (on) | speed/lossy |
+| 6d, fixed scales | for the normalized residual streams only (an RMS norm's output times a weight: the q / k / v and gate / up projections' inputs, found from the graph), K1's outlier channels and fp8 scale are fixed from whole prompts at the first decode step, and the norm writes the fp8 activations directly; the other K1 inputs (GLU, attention and Gated DeltaNet outputs) keep per-batch scales.  Part b | `FRANK_KQ_BLAS_FIXED` (2 with K1 fp8; 1 = after `_N` (4) batches, 0 = off) | speed/lossy |
+| own f16 GEMM | a WMMA f16 GEMM that decodes Q4_K / Q5_K / Q6_K / IQ4_XS weights inside the kernel (the same f16 values as K1 f16's conversion, f32 accumulation): with K1 f16 it replaces hipBLASLt from 128 tokens; with K1 fp8 it takes the batches below K1's threshold instead of MMQ.  Part b | `FRANK_KQ_BLAS_OWN` (off) | speed |
+| tail batch | the last 256 tokens of a long prompt in a batch of their own through the own f16 GEMM (or MMQ), so the state and the keys and values the reply starts from are not computed in fp8; with K1 fp8 only, prompts long enough by a cost measured at load.  Part b | `FRANK_KQ_BLAS_TAIL` (off; `own`, `mmq`), `_N` (256), `_MIN_CTX` (`auto`), `_BUDGET` (4.5) | fix |
 | prompt tail | a batch of 384 tokens or more that ends its prompts with output tokens hands those outputs to a decode-sized batch, so the logits a prompt ends with do not come from K1's prefill matmuls.  Batches with an output for every token (perplexity), embeddings and non-causal models are unchanged | `FRANK_PP_TAIL` (on), `_MIN` (384) | fix |
 | M4 | MXFP4 weights converted exactly to fp8 for K1's GEMM, from 64 tokens | `FRANK_MXFP4_DIRECT` (`blaslt`) | speed/lossy |
-| GLU in place | the graph allocator may give a GLU its gate's memory when nothing else reads the gate: 150 MiB less compute buffer at `-ub 2048` on Qwen3.8-27B | `FRANK_GLU_INPLACE` (on) | memory |
+| draft ubatch | the draft model's ubatch capped at 512: about 0.7 GiB less VRAM with `-ub 2048` | `FRANK_DRAFT_UB` (512) | memory |
 | fused prefill | the attention output gate reads Q in place; Q / K norm, rope and the FWHT in one kernel; one-step fp8 conversion of Q8_0 / IQ4_NL weights; Gated DeltaNet: the convolution with the q / k norm, the output norm with the SiLU gate, chunked rows in bf16, the scan reading the next chunk's gate early | switches in [SWITCHES.md](SWITCHES.md) | speed |
 
-- Code: rdna-boosts (MIT): the chunked Gated DeltaNet kernel the scan is adapted from.
+- Code: rdna-boosts (MIT): the chunked Gated DeltaNet kernel the scan is adapted from.  radiance (Apache-2.0): the own
+  f16 GEMM's tile, WMMA operand order and activation fragment order follow libr4d's `r4d_gemm_mxfp4a8_tiled`; its weight
+  decoding follows ggml's (MIT).
 - References: X. Wu, Z. Yao, Y. He, "ZeroQuant-FP: A Leap Forward in LLMs Post-Training W4A8 Quantization Using
   Floating-Point Formats", arXiv:2307.09782, 2023, §3 (4-bit weights cast to fp8 for an fp8 GEMM with fp8 activations: K1,
   M4; with power-of-two block scales, as MXFP4 has, the cast is exact: M4).  Ashkboos et al., QuaRot (J1; the FWHT the fused Q / K kernel
   applies before the KV store).  Micikevicius et al. 2022 (above); T. Dettmers et al., "LLM.int8()", arXiv:2208.07339,
   2022; S. Ashkboos et al.,
   "QUIK", arXiv:2310.09259, 2023; Y. Zhao et al., "Atom", MLSys 2024, arXiv:2310.19102 (outlier channels handled apart at
-  higher precision; with fixed KEEP, chosen once from calibration).  Fixed KEEP: R. Krishnamoorthi, "Quantizing deep
+  higher precision; with 6d, chosen once from calibration).  6d: R. Krishnamoorthi, "Quantizing deep
   convolutional networks for efficient inference: A whitepaper", arXiv:1806.08342, 2018 (activation ranges from
   calibration); NVIDIA Transformer Engine's FP8 delayed scaling (scales from earlier batches); Z. Yao, R. Yazdani Aminabadi,
   M. Zhang, X. Wu, C. Li, Y. He, "ZeroQuant: Efficient and Affordable Post-Training Quantization for Large-Scale
@@ -109,10 +127,8 @@ The large-batch path apart from attention.
   compute-native low-precision weights, decode on compact weight-only ones).  The residual ADD: J. J. Dongarra, J. Du Croz,
   S. Hammarling, I. S. Duff, "A Set of Level 3 Basic Linear Algebra Subprograms", ACM TOMS 16(1), 1990 (the GEMM's βC term),
   and J. Zeng et al., "Boosting Distributed Training Performance of the Unpadded BERT Model", arXiv:2208.08124, 2022 (an
-  addition at a residual taken into the GEMM through β).  16-bit GLU input: P. Micikevicius et al., "Mixed Precision
-  Training", ICLR 2018, arXiv:1710.03740 (fp32 accumulation, 16-bit output).  GLU in place: T. Chen, B. Xu, C. Zhang,
-  C. Guestrin, "Training Deep Nets with Sublinear Memory Cost", arXiv:1604.06174, 2016 (an operation writes into its input's
-  memory when it is that input's last reader, the rule of ggml's graph allocator).  Built on: S. Yang, B. Wang, Y. Zhang,
+  addition at a residual taken into the GEMM through β).  The own f16 GEMM: P. Micikevicius et al., "Mixed Precision
+  Training", ICLR 2018, arXiv:1710.03740 (16-bit inputs, fp32 accumulation).  Built on: S. Yang, B. Wang, Y. Zhang,
   Y. Shen, Y. Kim, "Parallelizing Linear Transformers with the Delta Rule over Sequence Length", NeurIPS 2024,
   arXiv:2406.06484, §3 (the chunkwise form the Gated DeltaNet scan computes); S. Yang, J. Kautz, A. Hatamizadeh, "Gated
   Delta Networks", ICLR 2025, arXiv:2412.06464; for M4, the OCP Microscaling Formats (MX)
@@ -183,19 +199,19 @@ How a step goes to the GPU.
 | part | what | switch | type |
 |---|---|---|---|
 | GPU-resident loop | with drafts, a step's sampling, draft acceptance (with J4's guard, J5's lenience and J3's verification), the next input and the KQ mask are made on the device; server requests and two sequences in one step run in it.  The host checks every step it reads back (the position moved, the last token, the recurrent state's cell; for a greedy sequence also that the emitted tokens are the target's); on a mismatch the loop stops and the host path takes over | `FRANK_STEP_LOOP` (on with one GPU, a ROCm one, on Linux and Windows; off with several GPUs), `FRANK_STEP_LOOP_SEQ2` (on), `FRANK_DEVICE_INPUT_MAPPED` (on), `FRANK_STEP_CHECK` (on); rdna-boosts' `LLAMA_DEVICE_INPUT` follows the loop when unset | speed, guard |
-| graphs for wider verification | the host path also records verify batches of 9-16 tokens as HIP graphs | `FRANK_GRAPH_MAX_TOKENS` (16) | speed |
 
 The loop gives greedy output identical to the host path; at temperature > 0 the draft model's placement can change a token,
 as on the host path.  A tied token embedding (a model without an output weight) is not mapped: it stays in VRAM as the
-output layer, one copy for both.
+output layer, one copy for both.  Graphs of 9-16 tokens on the host path are rdna-boosts' since r326
+(`GGML_CUDA_GRAPH_MAX_TOKENS`).
 
 - References: the vLLM Gaudi plugin's documentation, "Bucketing mechanism" (lengths padded so a recorded graph is
   replayed; the loop's verify graphs span `FRANK_STEP_KV_HEADROOM` free cells for the same reason).  R. Hasan,
   N. Korobov, R. Kobus, H. Huang, D. Mehra, "NVIDIA TensorRT-LLM Now Supports Recurrent Drafting for Optimizing LLM
   Inference", NVIDIA Technical Blog, 2024 (drafting and validation inside the engine instead of the host
   runtime).  Built on: Alan Gray, "Optimizing
-  llama.cpp AI Inference with CUDA Graphs", NVIDIA Technical Blog, 2024 (llama.cpp's graphs, which the wider verify batches
-  join).
+  llama.cpp AI Inference with CUDA Graphs", NVIDIA Technical Blog, 2024 (llama.cpp's graphs, which the loop's steps
+  replay).
 
 ## J7 state between requests
 
@@ -221,6 +237,25 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-21: J1 v4.2, J2 v8 (two files), J3 v5.1, J6 v9.1, J7 v1.2** on rdna-boosts `v17-4f9dfa0e3-r327` (the same
+llama.cpp `4f9dfa0e3`); J4 v1 and J5 v3 move as they are.  J2's new part b is applied last, after J7.
+- Moved to rdna-boosts, which now reads its own switches: the KQ block table reuse and its census (J1; r327, opt-in
+  there, on by default here: `GGML_CUDA_FA_KQ_BLOCKS_REUSE=0` turns it off; the same output), graphs of up to 16 tokens
+  (J6; r326, `GGML_CUDA_GRAPH_MAX_TOKENS`, which `FRANK_ALL=0` no longer lowers to 8) and the GLU in place (J2; r323,
+  `GGML_GLU_INPLACE`).  J3 v5.1: the per-evaluation call it shared with J1's reuse is now rdna-boosts'.  J7 v1.2: a warning
+  when `FRANK_FA_KQ_BLOCKS_REUSE`, `FRANK_FA_KQ_BLOCKS_CENSUS` or `FRANK_GRAPH_MAX_TOKENS` is set.
+- J2 part b, 6d on by default (`FRANK_KQ_BLAS_FIXED`, 2): K1 fp8's scales and KEEP channels are fixed at the first decode
+  step only for the normalized residual streams; every other K1 input keeps per-batch scales.  Fixing every input had made
+  some kinds of content much worse; this keeps the KLD of all 22 measured kinds within the floor ([Lossy parts](#lossy-parts)).
+  Prefill +1.6 / +2.1 / +1.2 % at 8K / 32K / 110K.  The previous mode that fixed every input, and the fp8 writes of the
+  GLU and Gated DeltaNet outputs it needed, are gone.
+- J2 part b, removed: 6g (`FRANK_KQ_BLAS_GLU16`, 16-bit gate / up products for the GLU; slower once 6d fixes only the
+  normalized streams) and the Gated DeltaNet output norm and SiLU gate kernel that wrote fp8 (`FRANK_GDN_NORM_SILU_FP8`).
+  Their switches only warn.
+- J2 part b, new and off by default: the own WMMA f16 GEMM (`FRANK_KQ_BLAS_OWN`) and the tail batch
+  (`FRANK_KQ_BLAS_TAIL`): a long prompt's last 256 tokens through it, which takes back 26 % of the fp8 error the
+  generation path sees for 87.7 ms per prompt (8K prompts).
 
 **2026-11-18: J6 v9.**  A model without an output weight uses its token embedding as the output layer.  With the
 mapped token embedding (`FRANK_DEVICE_INPUT_MAPPED`, on with the loop) the two were placed apart: a second copy of the

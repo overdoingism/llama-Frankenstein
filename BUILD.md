@@ -8,7 +8,7 @@ to repeat the build on either system.
 ## The result
 
 A HIP build of llama.cpp for gfx1201 whose source tree is llama.cpp at the pinned commit, with the rdna-boosts release
-applied by its own script, then this repository's seven patches.  `llama-server` is all the measurements need
+applied by its own script, then this repository's eight patch files.  `llama-server` is all the measurements need
 (`llama-bench` for speed alone).
 
 ## Pinned versions
@@ -16,8 +16,8 @@ applied by its own script, then this repository's seven patches.  `llama-server`
 | what | version |
 |---|---|
 | llama.cpp | commit `4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad` (10 commits after the `v1.0.0` tag; also in rdna-boosts' `release.json`, field `base`) |
-| llama-cpp-rdna-boosts | release tag `v16-4f9dfa0e3-r295` = commit `58184e329cc3de5b272ce9c6f77d04ecb8d44f16`.  If the tag or the repository is gone: the tag `pin/v16-4f9dfa0e3-r295` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), the same commit |
-| this repository | `patches/J1-*.patch` to `patches/J7-*.patch`, all seven, in that order |
+| llama-cpp-rdna-boosts | release tag `v17-4f9dfa0e3-r327` = commit `8f349d0e71b236e081e28efa9eb9dca7f5ace945`.  If the tag or the repository is gone: the tag `pin/v17-4f9dfa0e3-r327` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), the same commit |
+| this repository | all eight files in `patches/`, in this order: `J1-*`, `J2-*-prefill-a-*`, `J3-*`, `J4-*`, `J5-*`, `J6-*`, `J7-*`, `J2-*-prefill-b-*` (J2 v8 is the two J2 files; part b needs J4-J7's server and state code, so it goes last) |
 | ROCm | 10.0.0 with hipBLASLt.  Linux: AMD's TheRock Python packages `rocm[libraries,devel,device-gfx1201]==10.0.0`, whose `_rocm_sdk_devel` folder is the ROCm root.  Windows: TheRock's `therock-dist-windows-gfx120X-all-10.0.0` (URL and SHA-256 in the [CI workflow](.github/workflows/windows-gfx1201.yml)).  HIP compiler: that release's clang (`AMD clang version 23.0.0git`, llvm-project `8f497e0992fb`) |
 | compilers, build tools | Linux: GCC 13.3 for C / C++, CMake 3.28, make.  Windows: the SDK's clang for C, C++ and HIP, Visual Studio 2022 (not 2026) for the libraries and tools, CMake 4.3, Ninja, Git for Windows |
 | GPU | gfx1201 (Radeon AI PRO R9700).  gfx1200 takes the same paths but is untested |
@@ -29,9 +29,10 @@ applied by its own script, then this repository's seven patches.  `llama-server`
    `scripts/apply-all.sh <llama.cpp folder>`, run from the release checkout, commits one block after another with
    `git am` on a new branch (`rdna-boosts`), with the series author's identity and dates, so every machine gets the same
    commits; when `jq` is installed it also compares the result with the tree in its `release.json`.
-3. This repository's seven patches with `git apply`, J1 to J7, each checked with `git apply --check` right before it is
-   applied: each patch builds on the ones before it, so checking all seven up front fails from J3 on.  They are plain
-   diffs; nothing more is committed.
+3. This repository's eight patch files with `git apply`, in the order J1, J2 part a, J3, J4, J5, J6, J7, J2 part b, each
+   checked with `git apply --check` right before it is applied: each patch builds on the ones before it, so checking them
+   all up front fails.  J2 part b goes last, after J7: J2 v8 is the two J2 files together, and part b needs J4-J7's server
+   and state code.  They are plain diffs; nothing more is committed.
 4. A HIP build for gfx1201 with the ROCm 10.0.0 compiler and libraries, configured after step 3.
 5. The checks below.
 
@@ -56,10 +57,11 @@ applied by its own script, then this repository's seven patches.  `llama-server`
 | after | command | tree |
 |---|---|---|
 | the llama.cpp checkout | `git rev-parse HEAD^{tree}` | `cfb1f99a2793d89250533834737764cebff10be7` (`release.json` field `base_tree`) |
-| `apply-all.sh` | `git rev-parse HEAD^{tree}` | `bdfd4a182dc9bdf9a7b6a46a0f206622f37b5e34` (`release.json` field `tree`); the branch tip is commit `713a75c1aba315ceda42c9d7a0e86e831dfbc3dc` (field `tip`, there shortened to `713a75c1a`) |
-| the seven patches | `git add -A`, then `git write-tree` | `c411b0672c012e2ec13b0614b0b4f03f1ed8edc1` |
+| `apply-all.sh` | `git rev-parse HEAD^{tree}` | `4792f98b82a4c6433bf11c629fdf01c21a143ce9` (`release.json` field `tree`); the branch tip is commit `e159adfc2e6a15479ad6bb345a564e4aa132b581` (field `tip`) |
+| J1 to J7 (J2 part a only) | `git add -A`, then `git write-tree` | `aefbaa6dd4f2158d6cf99bf55926bcb93ad7e536` |
+| all eight files (J2 part b last) | `git add -A`, then `git write-tree` | `c4d7c8ec19136bcc219db4bd9b609efa0b2c4da2` |
 
-`git apply` leaves the new files untracked, so the last check stages everything first (that changes no file).  A build
+`git apply` leaves the new files untracked, so the last two checks stage everything first (that changes no file).  A build
 folder named `build*` at the top is ignored by llama.cpp's `.gitignore`; check before configuring if it lives elsewhere
 inside the tree.
 
@@ -85,13 +87,13 @@ them.
 
 All systems:
 
-- `v16-4f9dfa0e3-r295` is an annotated tag: `git rev-parse v16-4f9dfa0e3-r295` prints the tag object (`94e8b985...`), not
-  the commit.  Compare `git rev-parse v16-4f9dfa0e3-r295^{commit}` with the commit above.  The `pin/` tag in the fork
+- `v17-4f9dfa0e3-r327` is an annotated tag: `git rev-parse v17-4f9dfa0e3-r327` prints the tag object (`695555c5...`), not
+  the commit.  Compare `git rev-parse v17-4f9dfa0e3-r327^{commit}` with the commit above.  The `pin/` tag in the fork
   points at the commit itself.
 - `apply-all.sh` needs a clean llama.cpp tree and no existing `rdna-boosts` branch (it sets the committer identity
   itself).  Without `jq` it skips its tree check without saying so: check the tree yourself.  If it reports that it fell
   back to `git am -3`, the base was not the pinned commit.  Do not pass `--include-optional` or `--include-beta`: the
-  result is then not the measured tree.  It prints one `new blank line at EOF` warning while applying block 00; harmless,
+  result is then not the measured tree.  It prints one `new blank line at EOF` warning while applying block 10; harmless,
   the tree check covers it.
 - `git apply` of J6 warns about one new blank line at the end of a file (`ggml/src/ggml-cuda/spec-step.cu`).  Harmless:
   the patch is applied as it is, and the tree check above includes that line.
@@ -131,7 +133,7 @@ Windows:
 
 ## Checking the result
 
-- The three tree hashes above, and the configure line of `FRANK_HIPBLASLT`.
+- The tree hashes above, and the configure line of `FRANK_HIPBLASLT`.
 - The ROCm libraries the binary loads (Linux: `ldd`; Windows: the DLLs found next to the `.exe` or in `PATH`) are the
   10.0.0 ones.
 - With a model, the startup log lines listed under [Run and switches](README.md#run-and-switches).

@@ -18,21 +18,22 @@ and their KLD: [STRUCTURE.md](STRUCTURE.md#lossy-parts).
 | `FRANK_FA_FP8`<br>(default on, RDNA4) | `1`, `0` | **Lossy.**  Prefill flash attention in fp8, from a `q8_0` cache (head 64 / 128 / 256) or a `q8_0r` cache (head 256): batches of 32 tokens or more over 512 or more KV cells, GQA 1-8, no sinks / ALiBi / softcap.  Where it runs (every GPU RDNA4) it also makes rdna-boosts' `GGML_CUDA_FA_STAGE_MAX_MB` default to 1 ([related](#related-not-from-this-repo)). |
 | `FRANK_FA_Q8R`<br>(default on) | `1`, `0` | The decode / verify attention kernel of the `q8_0r` KV cache (`-ctk q8_0r -ctv q8_0r`): head 256, GQA up to 6, 1-31 query rows, RDNA4.  Its split points are fixed, so decoding a token and verifying it in a draft give the same numbers.  `0`: the op runs on f16 copies of K and V instead.  Not bit-identical to the `q8_0` kernels (within the floor). |
 | `FRANK_FA_BAND_SPLIT`<br>(default on) | `1`, `0` | With a `q8_0` cache on RDNA4: a draft-verification batch of 9-16 query rows (two slots of a unified KV cache verifying at once, or a long n-gram draft) runs as two halves of at most 8 rows through the decode / verify kernel instead of the generic one; each row gets the result a batch of 8 rows or fewer gives (not bit-identical to the generic kernel).  From `FRANK_FA_BAND_SPLIT_MIN_KV` KV cells (`8192`; `0` = any length).  A `q8_0r` cache does not need it (its kernel takes up to 31 rows). |
+| `GGML_CUDA_FA_KQ_BLOCKS_REUSE`<br>(default on here) | `1`, `0` | rdna-boosts' switch (r327; opt-in there): the attention layers of one graph evaluation share one KQ block table (the mask's KV-group bitmap) instead of each building its own.  The same output.  This set turns it on by default.  Measured: no difference on Linux; on Windows about +0.3 % decode with 2 slots and a parked 26K-token slot.  `GGML_CUDA_FA_KQ_BLOCKS_CENSUS=1` logs how often the table was built and reused ([related](#related-not-from-this-repo)). |
 
 ### J2 prefill
 
 | variable | values | what it does |
 |---|---|---|
 | `FRANK_KQ_BLAS`<br>(default `fp8` when every GPU is a gfx1201; otherwise off) | `fp8`, `f16`, `0` | Prefill matmuls of quantized weights (not MXFP4; dense layers, not MoE experts) through hipBLASLt (K1).  `fp8`: **lossy**, the fastest.  `f16`: weights converted to f16, KLD near the floor, slower.  Batches of 384 tokens or more on weights of 20M elements or more, 1024 or more on smaller weights; decode and draft verification never reach it.  Any other value (also `1`) logs a warning and leaves K1 off; an empty value counts as unset.  On other GPUs set it explicitly (the f16 algorithms are then timed at startup and can change between runs). |
-| `FRANK_KQ_BLAS_FP8_KEEP`<br>(default `64`) | a number, `0`-`248`; `0` = off | K1 `fp8` only: per input batch, the channels with the largest activations (rounded up to a multiple of 8) get a second fp8 term for their weight and activation rounding errors, in the same GEMM.  About half of the fp8 error above `f16` goes away for about 1% of prefill speed.  Weights with 1024 or more inputs. |
+| `FRANK_KQ_BLAS_FP8_KEEP`<br>(default `64`) | a number, `0`-`248`; `0` = off | K1 `fp8` only: per input batch (for the normalized inputs fixed by `FRANK_KQ_BLAS_FIXED`), the channels with the largest activations (rounded up to a multiple of 8) get a second fp8 term for their weight and activation rounding errors, in the same GEMM.  About half of the fp8 error above `f16` goes away for about 1% of prefill speed.  Weights with 1024 or more inputs. |
 | `FRANK_KQ_BLAS_ADD`<br>(default on) | `1`, `0` | The residual ADD after a matmul K1 or M4 takes goes into the GEMM.  The same output.  Off while `FRANK_MXFP4_ALGOS=timed`, and for K1 `f16` while its algorithms are timed. |
 | `FRANK_KQ_BLAS_PRECONV`<br>(default on in a Windows build; otherwise off) | `1`, `0` | Improves reliability on Windows. |
 | `FRANK_MXFP4_DIRECT`<br>(default `blaslt`, RDNA4) | `blaslt`, `0` | **Lossy.**  MXFP4 weights only (M4): prefill converts them exactly to fp8 and runs K1's fp8 GEMM.  Batches of 64 tokens or more.  `fp8` and `f16` select older kernels, a little slower; any other value (also `1` or empty) logs a warning and leaves M4 off. |
 | `FRANK_PP_TAIL`<br>(default on) | `1`, `0` | The prompt tail: a ubatch of 384 tokens or more (`FRANK_PP_TAIL_MIN`) that ends a sequence with tokens that need logits gives those tokens back to a small ubatch, so the logits a prompt ends with (a reply's first token) come from the decode-sized path, not from K1.  Batches with logits for every token (perplexity) are unchanged. |
-| `FRANK_GLU_INPLACE`<br>(default on) | `1`, `0` | The graph allocator may give a GLU (SwiGLU, GEGLU, ...) the memory of its gate when nothing else reads the gate, so an FFN's gate, up and GLU output are not all live at once: 136 MiB less compute buffer at `-ub 2048` on Qwen3.8-27B.  Same output. |
 | `FRANK_DRAFT_UB`<br>(default `512`) | a number; `0` = no cap | Caps the draft model's ubatch (only ever lowers it).  With `-ub 2048`, `512` saves about 0.7 GiB of VRAM. |
-| `FRANK_KQ_BLAS_FIXED`<br>(opt-in, default `0`) | `0`, `1`, `2` | **Lossy, beyond K1's own error.**  K1 `fp8` only: per matmul input, the KEEP channels and the activation scale are fixed after a calibration instead of measured on every batch, and the layer before writes the fp8 activations itself; prefill a few percent faster.  `1`: each input's first 4 batches calibrate (`FRANK_KQ_BLAS_FIXED_N`).  `2`: whole prompts calibrate; an input is fixed at the first decode step after 2 batches or 2048 tokens.  No effect when K1 is not `fp8`. |
-| `FRANK_KQ_BLAS_GLU16`<br>(opt-in, default off) | `f16` (or `1`), `0` | **Lossy, one more rounding.**  K1 `fp8` only: a gate / up matmul read only by its GLU writes 16-bit products, which the GLU reads.  Pays only together with `FRANK_KQ_BLAS_FIXED`. |
+| `FRANK_KQ_BLAS_FIXED`<br>(default `2` with K1 `fp8`; otherwise off) | `2`, `1`, `0` | **Lossy (6d).**  K1 `fp8` only: for the normalized residual streams (an input that is an RMS norm's output times a weight: the inputs of the q / k / v and gate / up projections, found from the graph), the KEEP channels and the activation scale are fixed after a calibration instead of measured on every batch, and the norm writes the fp8 activations itself.  Every other K1 input (a GLU's, attention's or Gated DeltaNet's output) keeps its per-batch scales.  `2`: whole prompts calibrate; an input is fixed at the first decode step after 2 batches or 2048 tokens of it.  `1`: after each input's first 4 batches (`FRANK_KQ_BLAS_FIXED_N`).  `0`: per batch.  Prefill +1.6 / +2.1 / +1.2 % at 8K / 32K / 110K tokens; the KLD within the floor on 22 kinds of content ([STRUCTURE.md](STRUCTURE.md#lossy-parts)).  No effect when K1 is not `fp8`. |
+| `FRANK_KQ_BLAS_OWN`<br>(opt-in, default off) | `1`, `0` | Q4_K / Q5_K / Q6_K / IQ4_XS prefill matmuls through this repo's own WMMA f16 GEMM, which decodes the weights inside the kernel into the same f16 values as K1 `f16`'s conversion and accumulates in f32 (no f16 copy of the weight per batch).  With K1 `f16` it replaces hipBLASLt and takes batches from 128 tokens (`FRANK_KQ_BLAS_OWN_MIN_T`); with K1 `fp8` it takes only the batches below K1's threshold (128-383 tokens), which otherwise go to MMQ.  Only `1` turns it on. |
+| `FRANK_KQ_BLAS_TAIL`<br>(opt-in, default off) | `own` (or `1`), `mmq`, `0` | **Changes values, toward K1 `f16`.**  K1 `fp8` only: the last 256 tokens (`FRANK_KQ_BLAS_TAIL_N`) of a long prompt run in a batch of their own, below the size K1 takes, so the recurrent state the prompt leaves and the keys and values the first reply token reads are not computed through K1's fp8.  `own`: that batch through the own f16 GEMM (weight types it does not take stay on MMQ); `mmq`: through MMQ.  Long enough: `FRANK_KQ_BLAS_TAIL_MIN_CTX`, `auto` (the default) or a prompt length in tokens; `auto` takes a prompt when the tail costs at most `FRANK_KQ_BLAS_TAIL_BUDGET` percent (`4.5`) of its new tokens' prefill time, from a measurement at load (about 6-8K new tokens on Qwen3.8-27B; 8192 prompt tokens if it could not be measured).  That measurement does not count as 6d's calibration.  Measured: it takes back 26 % of the fp8 error the generation path sees (KLD against K1 `f16`, 11 segments, UD-Q5_K_M, 8K prompts) for 87.7 ms per prompt. |
 
 ### J3 decode / verify
 
@@ -69,7 +70,6 @@ and their KLD: [STRUCTURE.md](STRUCTURE.md#lossy-parts).
 | `FRANK_STEP_LOOP_SEQ2`<br>(default on) | `1`, `0` | With the loop: two sequences are verified in one step. |
 | `FRANK_STEP_CHECK`<br>(default on) | `1`, `0` | With the loop: the host checks every step it reads back: the position moved by the tokens emitted, the last token, the recurrent state's parity, rows and cell; for a greedy sequence without a reasoning-guard replacement also that the emitted tokens are the target's and the step ended at the first draft that differs.  A mismatch is logged (`... the loop issues no more steps`), the loop issues no more steps and the host path takes over.  Same output and speed. |
 | `FRANK_DEVICE_INPUT_MAPPED`<br>(default on) | `1`, `0` | With the loop: the token embedding stays in pinned host memory that the GPU reads in place, so its lookup runs in the GPU graph without a VRAM copy (0.66 GiB less VRAM on Qwen3.8-27B).  Same bytes.  A tied embedding (a model without an output weight, such as Gemma 4) is not mapped: it stays in VRAM as the output layer, one copy for both. |
-| `FRANK_GRAPH_MAX_TOKENS`<br>(default `16`) | a number | The most tokens a host-path batch may have and still be captured as a HIP graph (the release: 8).  The same kernels; copying with an n-gram draft is about 3% faster per step. |
 
 ### J7 state between requests
 
@@ -82,13 +82,15 @@ and their KLD: [STRUCTURE.md](STRUCTURE.md#lossy-parts).
 
 ## Turning everything off
 
-`FRANK_ALL=0` (exactly `0`): every switch above that you leave unset defaults to off, so every part that changes values or
-the order of work is off; a switch you set still wins (`FRANK_ALL=0 FRANK_FA_FP8=1` turns on F8 alone).  What stays on is
-bit-identical: the fused kernels and A/B switches listed [below](#ab-switches-normally-unset), the shared KQ block table,
-the state copies in bands and in the background, and the pinned pools.  `FRANK_FA_Q8R` stays on too, but only acts on a
-`q8_0r` cache, which plain rdna-boosts does not have.  On r269, `FRANK_ALL=0` with a `q8_0` cache gave the same 512 decoded
-tokens as plain rdna-boosts with the draft model, and a KLD of 0 against it; on r277 and on r295, the same three replies as
-plain rdna-boosts (2026-11-14, 2026-11-17).
+`FRANK_ALL=0` (exactly `0`): every switch above that you leave unset defaults to off, so every part that changes values
+or the order of work is off; a switch you set still wins (`FRANK_ALL=0 FRANK_FA_FP8=1` turns on F8 alone).  What stays
+on is bit-identical: the fused kernels and A/B switches listed [below](#ab-switches-normally-unset), the state copies in
+bands and in the background, and the pinned pools.  It also turns off the shared KQ block table
+(`GGML_CUDA_FA_KQ_BLOCKS_REUSE`, as in the release) and 6d; rdna-boosts' own defaults (`GGML_GLU_INPLACE`,
+`GGML_CUDA_GRAPH_MAX_TOKENS`) stay as they are.  `FRANK_FA_Q8R` stays on too, but only acts on a `q8_0r` cache, which
+plain rdna-boosts does not have.  On r269, `FRANK_ALL=0` with a `q8_0` cache gave the same 512 decoded tokens as plain
+rdna-boosts with the draft model, and a KLD of 0 against it; on r277 and on r295, the same three replies as plain
+rdna-boosts (2026-11-14, 2026-11-17).
 
 ## Tuning (normally unset)
 
@@ -96,10 +98,11 @@ plain rdna-boosts (2026-11-14, 2026-11-17).
 |---|---|---|
 | `FRANK_KQ_BLAS_ALGOS` | built-in list on gfx1201 | K1 `f16` only: how hipBLASLt algorithms are picked.  `def.gfx1201v1`: the built-in gfx1201 list (refused on other GPUs, where the default is `tune`).  `K1a2.<...>`: reuse a table the log printed earlier.  `tune`: time the candidates at startup (about 9 s; the choice, and so the output, can change between runs).  `0`: hipBLASLt's own first choice.  The log prints the table in use as `FRANK_KQ_BLAS_ALGOS=K1a2.<...>`. |
 | `FRANK_MXFP4_ALGOS` | built-in gfx1201 fp8 list | Every fp8 GEMM (K1 `fp8` and M4).  `heur`: hipBLASLt's first choice.  `timed`: time the candidates on the first full batch (can change between runs; turns the residual ADD into the GEMM off). |
-| `FRANK_KQ_BLAS_GLU16_ALGOS` | built-in | The 16-bit-output fp8 GEMM of `FRANK_KQ_BLAS_GLU16`: `heur` or `timed`. |
 | `FRANK_KQ_BLAS_CHUNK_MB` | `0` (whole) | K1 `f16` only: converts weights in pieces of that many MB.  Saves little VRAM; prefill gets slower and the output changes.  Not recommended. |
-| `FRANK_KQ_BLAS_MIN_T` (384; f16: 640, at least 256), `FRANK_MXFP4_MIN_T` (64), `FRANK_FA_FP8_MIN_T` (32), `FRANK_FA_FP8_MIN_KV` (512), `FRANK_PP_TAIL_MIN` (384), `FRANK_FA_BAND_SPLIT_MIN_KV` (8192) | in brackets | The smallest batch (tokens) or KV length each path takes.  K1's applies to weights of 20M elements or more (smaller ones: at least 1024). |
-| `FRANK_KQ_BLAS_FIXED_N` (4), `_FIXED_MIN_B` (2), `_FIXED_MIN_T` (2048), `_FIXED_MARGIN` (1.0) | in brackets | `FRANK_KQ_BLAS_FIXED`: calibration batches in mode 1; batches and tokens before an input is fixed in mode 2; a factor on the calibrated scale. |
+| `FRANK_KQ_BLAS_MIN_T` (384; f16: 640, at least 256), `FRANK_KQ_BLAS_OWN_MIN_T` (128), `FRANK_MXFP4_MIN_T` (64), `FRANK_FA_FP8_MIN_T` (32), `FRANK_FA_FP8_MIN_KV` (512), `FRANK_PP_TAIL_MIN` (384), `FRANK_FA_BAND_SPLIT_MIN_KV` (8192) | in brackets | The smallest batch (tokens) or KV length each path takes.  K1's applies to weights of 20M elements or more (smaller ones: at least 1024). |
+| `FRANK_KQ_BLAS_FIXED_N` (4), `_FIXED_MIN_B` (2), `_FIXED_MIN_T` (2048), `_FIXED_MARGIN` (1.0) | in brackets | `FRANK_KQ_BLAS_FIXED`: calibration batches in mode 1; batches and tokens before an input is fixed in mode 2 (the default); a factor on the calibrated scale. |
+| `FRANK_KQ_BLAS_OWN_BMF`, `FRANK_KQ_BLAS_OWN_TN` | unset | The own f16 GEMM: `_BMF` `128` / `256` / `512` fixes the block height in tokens (unset: the least padded work); `_TN` `2` / `4` fixes the weight tile (diagnostics). |
+| `FRANK_KQ_BLAS_TAIL_N` (256), `_TAIL_MIN_CTX` (`auto`), `_TAIL_BUDGET` (4.5) | in brackets | `FRANK_KQ_BLAS_TAIL`: the tail's length (under 384, so K1 does not take it); the prompt length it starts at; the cost limit of `auto` in percent. |
 | `FRANK_FA_FP8_QB` | `4` | F8, head 256: how many 16-token groups of a block share one K / V tile (`2` or `4`; anything else 1).  Bit-identical. |
 | `FRANK_FA_Q8R_SPLIT` | `24` | `q8_0r` kernel: KV splits per head.  Another value gives other split points, so other numbers. |
 | `FRANK_HEAD_INT2_R` | `512` | Candidates recomputed exactly per column (16-4096). |
@@ -109,16 +112,15 @@ plain rdna-boosts (2026-11-14, 2026-11-17).
 ## A/B switches (normally unset)
 
 Each turns off one bit-identical change (or, for the M4 `fp8` mode, sets an experiment); `0` gives the earlier code path
-with the same output, for comparisons:
-`FRANK_FA_FP8_CONV`, `FRANK_FA_FP8_COMBINE4`, `FRANK_FA_Q8R_SW` (`2` = two staging warps), `FRANK_FA_KQ_BLOCKS_REUSE`,
-`FRANK_KQ_BLAS_SHARE`, `FRANK_KQ_BLAS_DIRECT`, `FRANK_KQ_BLAS_DIRECT_B32`, `FRANK_KQ_BLAS_FIXED_PRODUCER`,
-`FRANK_KQ_BLAS_FIXED_NOF32`, `FRANK_MXFP4_SHARE`, `FRANK_MXFP4_AMAX` / `FRANK_MXFP4_CONV` (`row` = the older kernel),
-`FRANK_FUSE_CONT_GATE_F32`, `FRANK_GDN_CONV_NORM_INPLACE`, `FRANK_GDN_BF16_IN`, `FRANK_GDN_NORM_SILU_FP8`,
-`FRANK_NORM_PAIR_WAVE`, `FRANK_NORM_ROWS_ROPE_FWHT`, `FRANK_ROPE_FWHT_WAVE`, `FRANK_DFLASH_CONV_FUSED`,
-`FRANK_FUSE_GDN_NORM_GATE_SILU`, `FRANK_RMS_Q8_1_REGS`, `FRANK_STEP_ONE_STREAM`, `FRANK_STEP_GRAPH_WIDE`,
-`FRANK_STEP_SLAB` (on whenever the loop is), `FRANK_SPEC_TRIGGER_STOP` (follows the loop), `FRANK_SERVER_CKPT_ALIGN_NEXT`.
-`FRANK_MXFP4_CFG` and `FRANK_MXFP4_SPLITK` are experiments of M4's `fp8` mode.  Do not set `FRANK_SLAB_SYNC=0`: it is
-racy (A/B only).
+with the same output, for comparisons: `FRANK_FA_FP8_CONV`, `FRANK_FA_FP8_COMBINE4`, `FRANK_FA_Q8R_SW` (`2` = two
+staging warps), `FRANK_KQ_BLAS_SHARE`, `FRANK_KQ_BLAS_DIRECT`, `FRANK_KQ_BLAS_DIRECT_B32`,
+`FRANK_KQ_BLAS_FIXED_PRODUCER`, `FRANK_KQ_BLAS_FIXED_NOF32`, `FRANK_MXFP4_SHARE`, `FRANK_MXFP4_AMAX` /
+`FRANK_MXFP4_CONV` (`row` = the older kernel), `FRANK_FUSE_CONT_GATE_F32`, `FRANK_GDN_CONV_NORM_INPLACE`,
+`FRANK_GDN_BF16_IN`, `FRANK_NORM_PAIR_WAVE`, `FRANK_NORM_ROWS_ROPE_FWHT`, `FRANK_ROPE_FWHT_WAVE`,
+`FRANK_DFLASH_CONV_FUSED`, `FRANK_FUSE_GDN_NORM_GATE_SILU`, `FRANK_RMS_Q8_1_REGS`, `FRANK_STEP_ONE_STREAM`,
+`FRANK_STEP_GRAPH_WIDE`, `FRANK_STEP_SLAB` (on whenever the loop is), `FRANK_SPEC_TRIGGER_STOP` (follows the loop),
+`FRANK_SERVER_CKPT_ALIGN_NEXT`.  `FRANK_MXFP4_CFG` and `FRANK_MXFP4_SPLITK` are experiments of M4's `fp8` mode.  Do not
+set `FRANK_SLAB_SYNC=0`: it is racy (A/B only).
 
 ## Diagnostics (normally unset)
 
@@ -128,7 +130,7 @@ racy (A/B only).
 | `FRANK_MXFP4_LOG=1` | Per MXFP4 weight on first use: the blocks outside the exact fp8 range (synchronizes). |
 | `FRANK_KQ_BLAS_CHECK=1` | Every weight conversion also runs the reference kernel and logs differing bytes (slow). |
 | `FRANK_FA_FP8_CONV_CHECK`, `FRANK_FA_FP8_ATTN_CHECK`, `FRANK_FA_FP8_COMBINE_CHECK`, `FRANK_FA_Q8R_COMBINE_CHECK`, `FRANK_FUSE_CONT_GATE_CHECK`, `FRANK_NORM_PAIR_WAVE_CHECK`, `FRANK_NORM_ROWS_ROPE_CHECK`, `FRANK_SSM_GATE_CHECK` | `1`: the fused or faster kernel is compared, bit for bit, with the one it replaces (testing only, slow). |
-| `FRANK_GDN_CONV_NORM_DEBUG`, `FRANK_GDN_NORM_SILU_FP8_DEBUG`, `FRANK_RS_ANCHOR_DEBUG` | `1`: log why a fusion was or was not taken. |
+| `FRANK_GDN_CONV_NORM_DEBUG`, `FRANK_RS_ANCHOR_DEBUG` | `1`: log why a fusion was or was not taken. |
 | `FRANK_HEAD_INT2_CHECK=1` (`_CHECK_K`, 16) | Every int2 head call also computes the exact logits and logs, every 64 calls, the columns whose exact top-K was not all among the candidates (with `GGML_CUDA_DISABLE_GRAPHS=1`). |
 | `FRANK_STEP_AUDIT=1` | With the loop on, the device-side acceptance is always re-run for greedy host steps and compared (a mismatch is logged).  `1` also has the device write each host step's inputs for the step slab to compare, logs the counts every 64 steps, and works with the loop off. |
 | `FRANK_STEP_DEBUG=1` (`2`, `3`: more) | The loop's bound inputs, hand-backs and run counts (WARN level).  Without it, a lasting reason the loop does not run (the drafter, a sampler) is logged once at INFO; `2` logs every reason, also the ones that come and go between steps (the prompt being processed, a pending draft). |
@@ -140,11 +142,21 @@ the same name after the prefix became `FRANK_*` (`GGML_LF_KQ_BLAS` → `FRANK_KQ
 `LLAMA_RS_ANCHOR` → `FRANK_RS_ANCHOR`, `GGML_LF_ALL` → `FRANK_ALL`).  An old name is no longer read; the server warns at
 startup when one is set.
 
+On r327 (2026-11-21) three parts moved to rdna-boosts, which now reads its own names: `FRANK_FA_KQ_BLOCKS_REUSE` →
+`GGML_CUDA_FA_KQ_BLOCKS_REUSE` (on by default here), `FRANK_FA_KQ_BLOCKS_CENSUS` → `GGML_CUDA_FA_KQ_BLOCKS_CENSUS`,
+`FRANK_GRAPH_MAX_TOKENS` → `GGML_CUDA_GRAPH_MAX_TOKENS` (the server warns when an old one is set), and `FRANK_GLU_INPLACE`
+→ `GGML_GLU_INPLACE` (no warning).  Removed with what they switched (the server warns when one is set): 6g's
+`FRANK_KQ_BLAS_GLU16` and `FRANK_KQ_BLAS_GLU16_ALGOS`, and `FRANK_GDN_NORM_SILU_FP8` / `_DEBUG` (the Gated DeltaNet output
+norm and SiLU gate kernel that wrote fixed fp8 activations).
+
 ## Related, not from this repo
 
 | variable | what it does |
 |---|---|
 | `GGML_CUDA_FA_STAGE_MAX_MB` | rdna-boosts: cap (MiB) of the flash-attention F16 staging copy, which only grows.  Where F8 runs (every GPU RDNA4) and the variable is unset, J1 sets it to 1: the batches F8 does not take (9-31 tokens) then read the cache directly, with the same result and speed, and the copy (about 1.2 GB at 240K context; on Windows it ends up in shared memory) is never made.  An explicit value still wins; `0` means no cap. |
+| `GGML_CUDA_FA_KQ_BLOCKS_CENSUS` | rdna-boosts (r327): `1` logs, per GPU context when it is freed, how often the KQ block table was built and reused. |
+| `GGML_CUDA_GRAPH_MAX_TOKENS` | rdna-boosts (r326): the most tokens a batch may have and still be captured as a HIP graph (16; `8` = the band before r326), so 9-16-token verify batches (two slots, n-gram drafts) and prefill ubatches are replayed too.  Replaces J6's `FRANK_GRAPH_MAX_TOKENS`; `FRANK_ALL=0` no longer lowers it. |
+| `GGML_GLU_INPLACE` | rdna-boosts (r323): a GLU may take its gate's memory when nothing else reads the gate, so an FFN's gate, up and GLU output are not all live at once (about 150 MiB less compute buffer at `-ub 2048` on Qwen3.8-27B); on, `0` off.  Replaces J2's `FRANK_GLU_INPLACE`. |
 | `LLAMA_DFLASH_DEV` | rdna-boosts: with a DFlash draft the target model's features stay on the GPU (on by default).  `0` forces the host path. |
 | `LLAMA_DEVICE_INPUT` | rdna-boosts: the input layer on the GPU.  Unset, it follows the GPU-resident loop (J6), which needs it. |
 | `LLAMA_STATE_ASYNC`, `LLAMA_STATE_ASYNC_MAX_MIB` | rdna-boosts: state copies through a pinned stage (on), and the size above which J7 copies in bands (256). |

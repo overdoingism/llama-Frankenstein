@@ -11,7 +11,7 @@ index c0232f1dd..4f296b463 100644
      subproc.cpp
      subproc.h
 diff --git a/common/common.cpp b/common/common.cpp
-index 15160cc1e..cf8305bd6 100644
+index 1e859534b..4af38e77b 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -16,6 +16,7 @@
@@ -39,7 +39,7 @@ index 15160cc1e..cf8305bd6 100644
  }
  
  void common_params_print_info(const common_params & params, bool print_devices) {
-@@ -2906,6 +2910,64 @@ void common_prompt_checkpoint::update_pos(
+@@ -2907,6 +2911,64 @@ void common_prompt_checkpoint::update_pos(
      this->pos_max  = pos_max;
  }
  
@@ -104,7 +104,7 @@ index 15160cc1e..cf8305bd6 100644
  void common_prompt_checkpoint::update_tgt(
          llama_context * ctx,
          llama_seq_id seq_id,
-@@ -2916,7 +2978,13 @@ void common_prompt_checkpoint::update_tgt(
+@@ -2917,7 +2979,13 @@ void common_prompt_checkpoint::update_tgt(
  
      const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
  
@@ -119,7 +119,7 @@ index 15160cc1e..cf8305bd6 100644
  
      const size_t n = llama_state_seq_get_data_ext(ctx, data_tgt.data(), ckpt_size, seq_id, flags);
      if (n != ckpt_size) {
-@@ -2934,7 +3002,13 @@ void common_prompt_checkpoint::update_dft(
+@@ -2935,7 +3003,13 @@ void common_prompt_checkpoint::update_dft(
  
      const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
  
@@ -134,7 +134,7 @@ index 15160cc1e..cf8305bd6 100644
  
      const size_t n = llama_state_seq_get_data_ext(ctx, data_dft.data(), ckpt_size, seq_id, flags);
      if (n != ckpt_size) {
-@@ -2954,7 +3028,8 @@ bool common_prompt_checkpoint::load_tgt(
+@@ -2955,7 +3029,8 @@ bool common_prompt_checkpoint::load_tgt(
          return true;
      }
  
@@ -144,7 +144,7 @@ index 15160cc1e..cf8305bd6 100644
      return n == data_tgt.size();
  }
  
-@@ -2970,7 +3045,8 @@ bool common_prompt_checkpoint::load_dft(
+@@ -2971,7 +3046,8 @@ bool common_prompt_checkpoint::load_dft(
          return true;
      }
  
@@ -155,10 +155,10 @@ index 15160cc1e..cf8305bd6 100644
  }
  
 diff --git a/common/common.h b/common/common.h
-index d6bff482a..37181b4b3 100644
+index 53ad2c4b6..64f51cbd4 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -910,6 +910,8 @@ struct common_params {
+@@ -921,6 +921,8 @@ struct common_params {
  // call once at the start of a program if it uses libcommon
  // initializes the logging system and prints info about the build
  void common_init();
@@ -167,7 +167,7 @@ index d6bff482a..37181b4b3 100644
  
  void common_params_print_info(const common_params & params, bool print_devices = true);
  std::string common_params_get_system_info(const common_params & params);
-@@ -1443,6 +1445,29 @@ enum ggml_opt_optimizer_type common_opt_get_optimizer(const char *);
+@@ -1454,6 +1456,29 @@ enum ggml_opt_optimizer_type common_opt_get_optimizer(const char *);
  //
  
  // leave default-inserted elements uninitialized; callers must fill them before use
@@ -197,7 +197,7 @@ index d6bff482a..37181b4b3 100644
  template <typename T>
  struct common_no_init_allocator : std::allocator<T> {
      template <typename U> struct rebind { using other = common_no_init_allocator<U>; };
-@@ -1451,11 +1476,26 @@ struct common_no_init_allocator : std::allocator<T> {
+@@ -1462,11 +1487,26 @@ struct common_no_init_allocator : std::allocator<T> {
      template <typename U> common_no_init_allocator(const common_no_init_allocator<U> &) {}
  
      template <typename U> void construct(U * p) { ::new ((void *) p) U; }
@@ -226,10 +226,10 @@ index d6bff482a..37181b4b3 100644
  
 diff --git a/common/renamed-env.cpp b/common/renamed-env.cpp
 new file mode 100644
-index 000000000..b446760a1
+index 000000000..bd26f8d93
 --- /dev/null
 +++ b/common/renamed-env.cpp
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,127 @@
 +// The switches of this patch set were renamed to FRANK_* (2026-11): a script that still sets an old name would silently get
 +// the default, so common_init() warns once for every old name it finds in the environment.  Only read at startup.
 +#include "common.h"
@@ -247,7 +247,6 @@ index 000000000..b446760a1
 +        { "GGML_CUDA_FA_FP8_CONV", "FRANK_FA_FP8_CONV" },
 +        { "GGML_CUDA_FA_FP8_CONV_CHECK", "FRANK_FA_FP8_CONV_CHECK" },
 +        { "GGML_CUDA_FA_FP8_QB", "FRANK_FA_FP8_QB" },
-+        { "GGML_CUDA_FA_KQ_BLOCKS_REUSE", "FRANK_FA_KQ_BLOCKS_REUSE" },
 +        { "GGML_CUDA_FA_Q8R", "FRANK_FA_Q8R" },
 +        { "GGML_CUDA_FA_Q8R_COMBINE_CHECK", "FRANK_FA_Q8R_COMBINE_CHECK" },
 +        { "GGML_CUDA_FA_Q8R_SPLIT", "FRANK_FA_Q8R_SPLIT" },
@@ -261,7 +260,6 @@ index 000000000..b446760a1
 +        { "GGML_CUDA_GDN_NORM_SILU_FP8", "FRANK_GDN_NORM_SILU_FP8" },
 +        { "GGML_CUDA_GDN_NORM_SILU_FP8_DEBUG", "FRANK_GDN_NORM_SILU_FP8_DEBUG" },
 +        { "GGML_CUDA_GDN_NT", "FRANK_GDN_NT" },
-+        { "GGML_CUDA_GRAPH_MAX_TOKENS", "FRANK_GRAPH_MAX_TOKENS" },
 +        { "GGML_CUDA_MMVK", "FRANK_MMVK" },
 +        { "GGML_CUDA_MMVK_EXT", "FRANK_MMVK_EXT" },
 +        { "GGML_CUDA_NORM_PAIR_WAVE", "FRANK_NORM_PAIR_WAVE" },
@@ -272,7 +270,6 @@ index 000000000..b446760a1
 +        { "GGML_CUDA_ROPE_FWHT_WAVE", "FRANK_ROPE_FWHT_WAVE" },
 +        { "GGML_CUDA_SSM_GATE_CHECK", "FRANK_SSM_GATE_CHECK" },
 +        { "GGML_CUDA_STEP_GRAPH_WIDE", "FRANK_STEP_GRAPH_WIDE" },
-+        { "GGML_GLU_INPLACE", "FRANK_GLU_INPLACE" },
 +        { "GGML_LF_ALL", "FRANK_ALL" },
 +        { "GGML_LF_DRAFT_UB", "FRANK_DRAFT_UB" },
 +        { "GGML_LF_FA_FP8", "FRANK_FA_FP8" },
@@ -342,13 +339,26 @@ index 000000000..b446760a1
 +    if (getenv("GGML_CUDA_FA_Q8R_FAST") != nullptr) {
 +        LOG_WRN("GGML_CUDA_FA_Q8R_FAST is set, but the q8_0r fast mode was removed: the variable has no effect\n");
 +    }
++    // retired for the release's own switches (r326 / r327)
++    if (getenv("FRANK_FA_KQ_BLOCKS_REUSE") != nullptr) {
++        LOG_WRN("FRANK_FA_KQ_BLOCKS_REUSE is set, but it is no longer read: the release's GGML_CUDA_FA_KQ_BLOCKS_REUSE "
++                "replaces it (on by default here, GGML_CUDA_FA_KQ_BLOCKS_REUSE=0 turns the reuse off)\n");
++    }
++    if (getenv("FRANK_FA_KQ_BLOCKS_CENSUS") != nullptr) {
++        LOG_WRN("FRANK_FA_KQ_BLOCKS_CENSUS is set, but it is no longer read: the release's GGML_CUDA_FA_KQ_BLOCKS_CENSUS "
++                "replaces it\n");
++    }
++    if (getenv("FRANK_GRAPH_MAX_TOKENS") != nullptr) {
++        LOG_WRN("FRANK_GRAPH_MAX_TOKENS is set, but it is no longer read: the release's GGML_CUDA_GRAPH_MAX_TOKENS "
++                "replaces it (default 16)\n");
++    }
 +    // LLAMA_SPEC_ALIGN is still read, by the release's draft-mtp-adaptive alignment; ours is FRANK_SPEC_ALIGN now
 +    if (getenv("LLAMA_SPEC_ALIGN") != nullptr && getenv("FRANK_SPEC_ALIGN") == nullptr) {
 +        LOG_INF("LLAMA_SPEC_ALIGN now sets only draft-mtp-adaptive's alignment; the other drafters' alignment is FRANK_SPEC_ALIGN\n");
 +    }
 +}
 diff --git a/include/llama.h b/include/llama.h
-index 3b3d3e0e4..302cb20bf 100644
+index 77c52dd49..85c4b5f21 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -1048,13 +1048,33 @@ extern "C" {
@@ -386,10 +396,10 @@ index 3b3d3e0e4..302cb20bf 100644
              struct llama_context * ctx,
                           uint8_t * dst,
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 0b3349a8c..f04891335 100644
+index c967add2c..e1a4a1b0e 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -1035,6 +1035,7 @@ llama_context::llama_context(
+@@ -1211,6 +1211,7 @@ llama_context::llama_context(
  }
  
  llama_context::~llama_context() {
@@ -397,7 +407,7 @@ index 0b3349a8c..f04891335 100644
      for (auto & be : state_pipe_evs) {
          for (ggml_backend_event_t ev : be.second) {
              if (ev != nullptr) {
-@@ -4767,20 +4768,73 @@ private:
+@@ -4990,20 +4991,73 @@ private:
  // synchronous read costs a device sync plus a bounce through the shared pinned chunk.  Instead, queue them all
  // as async copies into one reused pinned staging area, synchronize each backend once, and copy to the caller's
  // buffer on the host.  Restores are batched the same way through the same stage (llama_io_read_host, below;
@@ -476,7 +486,7 @@ index 0b3349a8c..f04891335 100644
  }
  
  // Pipelined batched state copies (fold r151, PR #233).  The batched copy ran the host memcpy into/out of the
-@@ -5045,38 +5099,133 @@ static bool llama_state_copy_bounces(ggml_backend_buffer_t buf) {
+@@ -5268,38 +5322,133 @@ static bool llama_state_copy_bounces(ggml_backend_buffer_t buf) {
  }
  
  class llama_io_write_host : public llama_io_write_i {
@@ -617,7 +627,7 @@ index 0b3349a8c..f04891335 100644
          for (size_t g = 0; piped && g < n_grp; ++g) {
              for (size_t i = grp[g]; piped && i < grp[g + 1]; ++i) {
                  bool seen = false;
-@@ -5096,8 +5245,8 @@ public:
+@@ -5319,8 +5468,8 @@ public:
          size_t off = 0;
          for (size_t g = 0; g < n_grp; ++g) {
              for (size_t i = grp[g]; i < grp[g + 1]; ++i) {
@@ -628,7 +638,7 @@ index 0b3349a8c..f04891335 100644
              }
              if (piped) {
                  for (const auto & be : grp_ev[g]) {
-@@ -5109,27 +5258,35 @@ public:
+@@ -5332,27 +5481,35 @@ public:
              llama_state_sync_all(bks);
          }
          size_t stage_off = 0;
@@ -680,7 +690,7 @@ index 0b3349a8c..f04891335 100644
          }
          return true;
      }
-@@ -5207,6 +5364,8 @@ private:
+@@ -5430,6 +5587,8 @@ private:
  };
  
  class llama_io_read_host : public llama_io_read_i {
@@ -689,7 +699,7 @@ index 0b3349a8c..f04891335 100644
  public:
      llama_io_read_host(const uint8_t * p, size_t len, llama_context * lctx = nullptr) : ptr(p), base_ptr(p), lctx(lctx), buf_size(len) {}
  
-@@ -5223,32 +5382,87 @@ public:
+@@ -5446,32 +5605,87 @@ public:
          for (const auto & r : rinfos) {
              total += r.size;
          }
@@ -786,7 +796,7 @@ index 0b3349a8c..f04891335 100644
          }
          static const bool st_timing = getenv("LLAMA_STATE_TIMING") != nullptr;
          const int n_copy_threads = llama_state_copy_threads(total);
-@@ -5256,11 +5470,11 @@ public:
+@@ -5479,11 +5693,11 @@ public:
          for (size_t g = 0; g + 1 < grp.size(); ++g) {
              llama_state_copy_pieces(pcs, grp[g], grp[g + 1], n_copy_threads);
              for (size_t i = grp[g]; i < grp[g + 1]; ++i) {
@@ -800,7 +810,7 @@ index 0b3349a8c..f04891335 100644
                             total / 1048576.0, grp.size() - 1, (ggml_time_us() - t_pack) / 1e3);
          }
          llama_state_sync_all(bks);   // the stage is reused by the next state copy on this context
-@@ -5765,7 +5979,7 @@ uint8_t * llama_context::state_stage(size_t size) {
+@@ -5988,7 +6202,7 @@ uint8_t * llama_context::state_stage(size_t size) {
      if (buf_state_stage == nullptr || ggml_backend_buffer_get_size(buf_state_stage.get()) < size) {
          buf_state_stage.reset();
          // the pinned type of the output device (the first simple device of a meta device), as for the outputs
@@ -809,7 +819,7 @@ index 0b3349a8c..f04891335 100644
          // ever grows, so a small save after a large one keeps the large allocation.
          auto * dev = model.dev_output();
          ggml_backend_buffer_type_t buft = dev ? ggml_backend_dev_host_buffer_type(dev) : nullptr;
-@@ -5810,6 +6024,23 @@ ggml_backend_event_t llama_context::state_pipe_event(ggml_backend_t backend, siz
+@@ -6033,6 +6247,23 @@ ggml_backend_event_t llama_context::state_pipe_event(ggml_backend_t backend, siz
      return evs[group];
  }
  
@@ -833,7 +843,7 @@ index 0b3349a8c..f04891335 100644
  ggml_backend_t llama_context::state_backend(const ggml_tensor * t) {
      ggml_backend_buffer_t buf = t->view_src ? t->view_src->buffer : t->buffer;
      if (buf == nullptr) {
-@@ -5835,6 +6066,7 @@ size_t llama_context::state_get_size() {
+@@ -6058,6 +6289,7 @@ size_t llama_context::state_get_size() {
  }
  
  size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
@@ -841,7 +851,7 @@ index 0b3349a8c..f04891335 100644
      llama_io_write_host io(dst, size, this);
      try {
          return state_write_data(io);
-@@ -5845,6 +6077,7 @@ size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
+@@ -6068,6 +6300,7 @@ size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
  }
  
  size_t llama_context::state_set_data(const uint8_t * src, size_t size) {
@@ -849,7 +859,7 @@ index 0b3349a8c..f04891335 100644
      llama_io_read_host io(src, size, this);
      try {
          return state_read_data(io);
-@@ -5871,6 +6104,18 @@ size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_fl
+@@ -6094,6 +6327,18 @@ size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_fl
  }
  
  size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, size_t size, llama_state_seq_flags flags) {
@@ -868,7 +878,7 @@ index 0b3349a8c..f04891335 100644
      std::unique_ptr<llama_io_write_i> io;
      if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
          io = std::make_unique<llama_io_write_device>(dst, size, mem_storage[seq_id], this);
-@@ -5885,11 +6130,22 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
+@@ -6108,11 +6353,22 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
          return state_seq_write_data(*io, seq_id, flags);
      } catch (const std::exception & err) {
          LLAMA_LOG_ERROR("%s: error saving state: %s\n", __func__, err.what());
@@ -891,7 +901,7 @@ index 0b3349a8c..f04891335 100644
      std::unique_ptr<llama_io_read_i> io;
      if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
          // create a temporary io to read the magic and the src seq_id
-@@ -5930,6 +6186,7 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
+@@ -6153,6 +6409,7 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
  }
  
  bool llama_context::state_load_file(const char * filepath, llama_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
@@ -899,7 +909,7 @@ index 0b3349a8c..f04891335 100644
      llama_file file(filepath, "rb");
  
      // sanity checks
-@@ -5973,6 +6230,7 @@ bool llama_context::state_load_file(const char * filepath, llama_token * tokens_
+@@ -6196,6 +6453,7 @@ bool llama_context::state_load_file(const char * filepath, llama_token * tokens_
  }
  
  bool llama_context::state_save_file(const char * filepath, const llama_token * tokens, size_t n_token_count) {
@@ -907,7 +917,7 @@ index 0b3349a8c..f04891335 100644
      llama_file file(filepath, "wb");
  
      file.write_u32(LLAMA_SESSION_MAGIC);
-@@ -5990,6 +6248,7 @@ bool llama_context::state_save_file(const char * filepath, const llama_token * t
+@@ -6213,6 +6471,7 @@ bool llama_context::state_save_file(const char * filepath, const llama_token * t
  }
  
  size_t llama_context::state_seq_load_file(llama_seq_id seq_id, const char * filepath, llama_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
@@ -915,7 +925,7 @@ index 0b3349a8c..f04891335 100644
      llama_file file(filepath, "rb");
  
      // version checks
-@@ -6044,6 +6303,7 @@ size_t llama_context::state_seq_load_file(llama_seq_id seq_id, const char * file
+@@ -6267,6 +6526,7 @@ size_t llama_context::state_seq_load_file(llama_seq_id seq_id, const char * file
  }
  
  size_t llama_context::state_seq_save_file(llama_seq_id seq_id, const char * filepath, const llama_token * tokens, size_t n_token_count) {
@@ -923,7 +933,7 @@ index 0b3349a8c..f04891335 100644
      llama_file file(filepath, "wb");
  
      file.write_u32(LLAMA_STATE_SEQ_MAGIC);
-@@ -6109,6 +6369,10 @@ size_t llama_context::state_read_data(llama_io_read_i & io) {
+@@ -6332,6 +6592,10 @@ size_t llama_context::state_read_data(llama_io_read_i & io) {
      return io.n_bytes();
  }
  
@@ -934,7 +944,7 @@ index 0b3349a8c..f04891335 100644
  size_t llama_context::state_seq_write_data(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
      if (memory) {
          memory->state_write(io, seq_id, flags);
-@@ -7310,11 +7574,20 @@ size_t llama_state_seq_get_size_ext(llama_context * ctx, llama_seq_id seq_id, ll
+@@ -7537,11 +7801,20 @@ size_t llama_state_seq_get_size_ext(llama_context * ctx, llama_seq_id seq_id, ll
      return ctx->state_seq_get_size(seq_id, flags);
  }
  
@@ -956,7 +966,7 @@ index 0b3349a8c..f04891335 100644
      ctx->synchronize();
  
 diff --git a/src/llama-context.h b/src/llama-context.h
-index 432602672..541392aaa 100644
+index e08520f76..ec2b1ef65 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -14,6 +14,8 @@
@@ -989,7 +999,7 @@ index 432602672..541392aaa 100644
      size_t state_seq_set_data(llama_seq_id seq_id, const uint8_t * src, size_t size, llama_state_seq_flags flags);
  
      bool state_load_file(
-@@ -562,6 +571,9 @@ private:
+@@ -563,6 +572,9 @@ private:
      // retained across saves and one buffer per context (state saves on one context must not run concurrently).
      ggml_backend_buffer_ptr buf_state_stage;
      std::vector<std::pair<ggml_backend_t, std::array<ggml_backend_event_t, n_state_pipe_events>>> state_pipe_evs;
@@ -1137,10 +1147,10 @@ index 371203648..3b11f33d2 100644
  
      //
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index b95f3ab6e..a82a4c672 100644
+index c207a06f7..565e0b6fc 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
-@@ -928,6 +928,24 @@ size_t llama_memory_recurrent::size_p_bytes() const {
+@@ -932,6 +932,24 @@ size_t llama_memory_recurrent::size_p_bytes() const {
      return size_p_bytes;
  }
  
@@ -1166,7 +1176,7 @@ index b95f3ab6e..a82a4c672 100644
      GGML_UNUSED(flags);
  
 diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
-index 0d9afdd02..2fe606b99 100644
+index 316e31e26..bed44b14b 100644
 --- a/src/llama-memory-recurrent.h
 +++ b/src/llama-memory-recurrent.h
 @@ -66,6 +66,7 @@ public:
@@ -1193,7 +1203,7 @@ index 395c0a5c2..1755dbaf7 100644
  };
  
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index f276bb447..d20dfcff3 100644
+index cbbb6e1aa..a274c01ee 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -377,8 +377,8 @@ struct server_slot {
@@ -1207,7 +1217,7 @@ index f276bb447..d20dfcff3 100644
          if (n_tgt != cur_size_tgt || n_dft != cur_size_dft) {
              SLT_ERR(*this, "%s", "failed to save complete prompt state\n");
              prompt_cache.states.pop_back();
-@@ -1197,6 +1197,29 @@ private:
+@@ -1272,6 +1272,29 @@ private:
          return e == nullptr || atoi(e) != 0;
      }();
  
@@ -1237,7 +1247,7 @@ index f276bb447..d20dfcff3 100644
      std::vector<common_state_data> ckpt_spare;
  
      // LLAMA_SERVER_SPEC_CKPT_DEVICE: where the target's speculative checkpoint is kept -- the one saved before a verify
-@@ -1225,6 +1248,25 @@ private:
+@@ -1300,6 +1323,25 @@ private:
      }();
      static constexpr size_t SPEC_CKPT_DEVICE_HEADROOM = 512ull << 20;
  
@@ -1263,7 +1273,7 @@ index f276bb447..d20dfcff3 100644
      // the one GPU the target runs on, nullptr when there are several (a split model) or none
      ggml_backend_dev_t spec_ckpt_gpu() const {
          std::vector<ggml_backend_dev_t> gpus;
-@@ -1301,6 +1343,10 @@ private:
+@@ -1376,6 +1418,10 @@ private:
              if (v->empty()) {
                  continue;
              }
@@ -1274,7 +1284,7 @@ index f276bb447..d20dfcff3 100644
              if (ckpt_spare.size() < 4) {
                  ckpt_spare.push_back(std::move(*v));
              } else {
-@@ -1314,8 +1360,13 @@ private:
+@@ -1389,8 +1435,13 @@ private:
          }
      }
  
@@ -1289,7 +1299,7 @@ index f276bb447..d20dfcff3 100644
          for (auto it = ckpt_spare.begin(); it != ckpt_spare.end(); ++it) {
              if (it->size() == n) {
                  common_state_data v = std::move(*it);
-@@ -1834,6 +1885,33 @@ private:
+@@ -1946,6 +1997,33 @@ private:
          }
          SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
  
@@ -1323,7 +1333,7 @@ index f276bb447..d20dfcff3 100644
          if (params_base.n_ctx_checkpoints > 0) {
              SRV_TRC("context checkpoints enabled, max = %d, min spacing = %d\n",
                      params_base.n_ctx_checkpoints, params_base.checkpoint_min_step);
-@@ -3137,8 +3215,9 @@ private:
+@@ -3362,8 +3440,9 @@ private:
                  cur.data_dft = ckpt_take(llama_state_seq_get_size_ext(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
              }
          }
@@ -1335,7 +1345,7 @@ index f276bb447..d20dfcff3 100644
          // stash the draft's speculative state with the checkpoint
          common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
  
-@@ -3372,6 +3451,10 @@ private:
+@@ -3597,6 +3676,10 @@ private:
              SRV_DBG("decoding, decline task, id_task = %d\n", task.id);
              return false;
          }
@@ -1346,7 +1356,7 @@ index f276bb447..d20dfcff3 100644
  
          switch (task.type) {
              case SERVER_TASK_TYPE_COMPLETION:
-@@ -4448,6 +4531,9 @@ private:
+@@ -4673,6 +4756,9 @@ private:
      }
  
      void update_slots() {
@@ -1356,7 +1366,7 @@ index f276bb447..d20dfcff3 100644
          step_loop_try();
  #ifdef DEBUG_TIMINGS
          static int64_t t_prev = 0;
-@@ -5471,6 +5557,9 @@ private:
+@@ -5802,6 +5888,9 @@ private:
  
                              bool should_break = false;
                              for (int offset : checkpoint_offsets) {
@@ -1366,7 +1376,7 @@ index f276bb447..d20dfcff3 100644
                                  const int n_last = std::min(n_batch, offset);
                                  if (slot.task->n_tokens() == slot.prompt.n_tokens() + n_last) {
                                      should_break = true;
-@@ -5488,7 +5577,17 @@ private:
+@@ -5822,7 +5911,17 @@ private:
  
                      const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
  
