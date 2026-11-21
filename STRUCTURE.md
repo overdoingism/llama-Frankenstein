@@ -218,7 +218,7 @@ output layer, one copy for both.  Graphs of 9-16 tokens on the host path are rdn
 | part | what | switch | type |
 |---|---|---|---|
 | state copy in bands | a state above 256 MiB (the prompt cache saving or restoring a long slot) goes through the pinned stage one band at a time.  One device only | `FRANK_STATE_ASYNC_BANDS` (on with one device) | speed |
-| checkpoints in the background | context checkpoints are saved asynchronously; when a slot is cleared or changes hands they move into the prompt cache instead of being copied | `FRANK_SERVER_CKPT_ASYNC` (on) | speed |
+| checkpoints in the background | a context checkpoint is saved asynchronously: the save returns once the device copies are queued, and the host copy (about 11 ms for Qwen3.8-27B's 150 MiB recurrent state, plus the draft's) runs on a worker thread beside the decode instead of before the request's first token | `FRANK_SERVER_CKPT_ASYNC` (on) | speed |
 | pinned pools | prompt-cache states and checkpoints live in pinned host memory sized at startup from the tensor shapes, copied straight to and from the device | `FRANK_SERVER_CACHE_PINNED`, `FRANK_SERVER_CKPT_PINNED` | speed |
 | checkpoints on the batch grid | checkpoints are cut at batch starts, so a shared prefix is split the same way whatever follows it: a request continued from the cache gives the same output as one run from scratch | `FRANK_SERVER_CKPT_ALIGN` (on) | fix |
 
@@ -237,6 +237,10 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-22: docs.**  The J7 table no longer says that a cleared slot's checkpoints move into the prompt cache instead
+of being copied: llama.cpp has shared them with the prompt cache since its reference-counted checkpoints, and J7 has
+not carried that part since then.  No patch changes.
 
 **2026-11-22: J2 v10.**  Both J2 files change; nothing in J2 comes from libr4d or radiance any more, so the radiance
 license files and the NOTICE are gone and the patches are MIT.
