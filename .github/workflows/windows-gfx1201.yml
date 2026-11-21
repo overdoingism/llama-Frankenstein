@@ -49,9 +49,9 @@ jobs:
           git -C llama.cpp checkout --quiet "$BASE"
           cd llama.cpp
           bash ../rdna-boosts/scripts/apply-all.sh .
-          # J2 v9 is two files: part b goes last, after J7 (it needs J4-J7's server and state code)
-          for f in J1-4f9-attention-v4.2 J2-4f9-prefill-a-v9 J3-4f9-decode-v5.1 J4-4f9-sampling-v1 \
-                   J5-4f9-speculative-v3 J6-4f9-step-v9.1 J7-4f9-state-v1.2 J2-4f9-prefill-b-v9; do
+          # J2 v10 is two files: part b goes last, after J7 (it needs J4-J7's server and state code)
+          for f in J1-4f9-attention-v4.2 J2-4f9-prefill-a-v10 J3-4f9-decode-v5.1 J4-4f9-sampling-v1 \
+                   J5-4f9-speculative-v3 J6-4f9-step-v9.1 J7-4f9-state-v1.2 J2-4f9-prefill-b-v10; do
             echo "applying $f.patch"
             git apply "../overdoing/patches/$f.patch"
           done

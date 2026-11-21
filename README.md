@@ -7,24 +7,22 @@ rdna-boosts paths, and only the parts outside them gain.
 
 | code from | license | what it gave |
 |---|---|---|
-| [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) | MIT | the engine |
+| [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) | MIT | the engine; the WMMA tile helpers (`mma.cuh`) of J2's own Gated DeltaNet kernel and own f16 GEMM |
 | [llama-cpp-rdna-boosts](https://github.com/stew675/llama-cpp-rdna-boosts) | MIT | the RDNA4 base these patches apply to; its decode-attention band, KQ block table and the table's reuse across layers (J1), the GLU in place (J2), grid-stall padding (J3), graphs of up to 16 tokens (J6) |
-| [radiance](https://codeberg.org/StillDeadcode/radiance) (its libr4d) | Apache-2.0 | the Gated DeltaNet chunked prefill kernels that rdna-boosts ported from libr4d, as J2 part a changes them; the tile and fragment order of J2 part b's own f16 GEMM ([NOTICE](NOTICE)) |
 
-The papers each part follows, and thanks: [STRUCTURE.md](STRUCTURE.md).  Patches only; MIT, except the parts from radiance, which stay under
-Apache-2.0 ([NOTICE](NOTICE), [third_party/radiance](third_party/radiance)).  Written with Claude (AI).
+The papers each part follows, and thanks: [STRUCTURE.md](STRUCTURE.md).  Patches only; MIT.  Written with Claude (AI).
 
 ## Structure
 
 The main pipeline has been rebuilt.  This repo's earlier patches (0001-0015) and a new GPU-resident speculative pipeline
-are merged into seven groups, numbered in the order of inference.  Each is one patch, except J2, which is two (J2 v9 is
+are merged into seven groups, numbered in the order of inference.  Each is one patch, except J2, which is two (J2 v10 is
 both files): its part b is applied last, after J7, because it needs J4-J7's server and state code.  The order: J1, J2
 part a, J3, J4, J5, J6, J7, J2 part b.
 
 | group | part of the engine | what changes | type |
 |---|---|---|---|
 | J1 | attention | the full-attention layers' KV cache and every kernel that reads it: fp8 prefill attention, a `q8_0r` cache with a batch-invariant decode / verify kernel, 9-16 row verification through the decode kernel | speed/lossy, speed |
-| J2 | prefill | part a: large-batch matmuls in fp8 through hipBLASLt (K-quant and MXFP4 weights), fused Gated DeltaNet prefill, the logits a prompt ends with from a decode-sized batch; part b (applied last): K1's fp8 scales fixed for the normalized inputs after the first decode step (6d), an own WMMA f16 GEMM and an f16 batch for a long prompt's last tokens (both opt-in) | speed/lossy, memory, speed, fix |
+| J2 | prefill | part a: large-batch matmuls in fp8 through hipBLASLt (K-quant and MXFP4 weights), fused Gated DeltaNet prefill on an own chunked kernel, the logits a prompt ends with from a decode-sized batch; part b (applied last): K1's fp8 scales fixed for the normalized inputs after the first decode step (6d), an own WMMA f16 GEMM and an f16 batch for a long prompt's last tokens (both opt-in) | speed/lossy, memory, speed, fix |
 | J3 | decode / verify | 1-16 token matmuls; Gated DeltaNet draft verification with two state planes instead of one per draft token; fused decode ops; the draft model's output layer scored from an int2 copy, its best candidates recomputed exactly | speed/diff, memory, speed |
 | J4 | sampling | an end of turn sampled inside the reasoning becomes the reasoning's end tag | guard |
 | J5 | speculative decoding | the draft width from the acceptance, drafts of one length for slots verifying together, n-gram drafts from the prompt, an opt-in lenience for sampled drafts | speed, speed/trade-off, sampling |
@@ -62,6 +60,11 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
   after the first decode step; prefill +1.6 / +2.1 / +1.2 % at 8K / 32K / 110K on UD-Q4_K_XL with 2 slots, KLD within
   the floor of the per-batch scales on 22 kinds of content: [STRUCTURE.md](STRUCTURE.md#lossy-parts)) and rdna-boosts' KQ
   block table reuse (J1, the same output).
+- J2 v10 (2026-11-22) changes one more default the table does not include: Gated DeltaNet prefill runs on an own chunked
+  kernel instead of rdna-boosts' (`FRANK_GDN_OWN`).  Against J2 v9: prefill -0.3 / -0.2 / -0.2 % at 8K / 32K / 110K on
+  UD-Q4_K_XL with 2 slots, the same time per decode step and the same draft acceptance.  Its KLD against an fp32 Gated
+  DeltaNet reference is in the same range as rdna-boosts' kernel's (with K1 `f16`: -7 % over 3K prefixes, +10 % over 48K;
+  with K1 `fp8`: within the floor).
 
 ### History
 
@@ -150,8 +153,8 @@ KLD reference above.  Every switch, its values and its default: [SWITCHES.md](SW
 ## Notice
 
 These patches are offered for research and evaluation.  Every part can be turned off with its switch
-([SWITCHES.md](SWITCHES.md)).  Code from other projects is credited under its license in the file headers, in
-[NOTICE](NOTICE) and in [STRUCTURE.md](STRUCTURE.md), which also lists the papers each part follows.
+([SWITCHES.md](SWITCHES.md)).  Code from other projects is credited under its license in the file headers and in
+[STRUCTURE.md](STRUCTURE.md), which also lists the papers each part follows.
 
 ## Thanks
 

@@ -112,10 +112,18 @@ index 2402c745b..903177b14 100644
  }
  
 diff --git a/ggml/src/ggml-cuda/lf-kq-blas.cu b/ggml/src/ggml-cuda/lf-kq-blas.cu
-index a1b296d51..48fb3fc6e 100644
+index a1b296d51..661f064b4 100644
 --- a/ggml/src/ggml-cuda/lf-kq-blas.cu
 +++ b/ggml/src/ggml-cuda/lf-kq-blas.cu
-@@ -59,7 +59,33 @@ int lf_kq_mode() {
+@@ -2,6 +2,7 @@
+ #include "lf-mxfp4.cuh"
+ #include "convert.cuh"
+ #include "dequantize.cuh"
++#include "mma.cuh"
+ 
+ #include <atomic>
+ #include <functional>
+@@ -59,7 +60,33 @@ int lf_kq_mode() {
      return mode;
  }
  bool lf_kq_on() { return lf_kq_mode() != 0; }
@@ -125,7 +133,7 @@ index a1b296d51..48fb3fc6e 100644
 +// and accumulates in f32: the result differs from the hipBLASLt GEMM only in the order of the sums.  It also takes batches from
 +// FRANK_KQ_BLAS_OWN_MIN_T tokens (default 128), below K1 f16's threshold (gfx1201, Qwen3.8-27B's linear shapes, the weights
 +// past the Infinity Cache: 20..25% faster than MMQ at 128..512 tokens, 5..25% faster than the hipBLASLt path at 512..2048).
-+// FRANK_KQ_BLAS_OWN_BMF=128 / 256 / 512 fixes the block height in tokens (default: the least padded work, see lf_o16_bmf).
++// FRANK_KQ_BLAS_OWN_SHAPE=TMxTN/WMxWN[a2] fixes the block shape (diagnostics; default: by batch size, see lf_o16_pick).
 +// With K1 fp8 (the default) the own GEMM takes only the batches below K1's threshold (FRANK_KQ_BLAS_OWN_MIN_T up to
 +// FRANK_KQ_BLAS_MIN_T, default 128..383 tokens), which otherwise go to MMQ; K1 fp8 keeps the rest.
 +static bool lf_kq_own16_on() {
@@ -150,7 +158,7 @@ index a1b296d51..48fb3fc6e 100644
  [[maybe_unused]] static const char * lf_kq_mode_name() {
      switch (lf_kq_mode()) {
          case 1: return "f16";
-@@ -133,12 +159,28 @@ int lf_kq_chunk_rows(const int M, const int K) {
+@@ -133,12 +160,28 @@ int lf_kq_chunk_rows(const int M, const int K) {
  }
  
  // the shape conditions shared by will_take (graph fusion stand-down) and supported (dispatch)
@@ -182,14 +190,6 @@ index a1b296d51..48fb3fc6e 100644
  }
  
  #if defined(FRANK_HIPBLASLT)
-@@ -219,6 +261,7 @@ struct lf_kq_scratch {
-     const void *        x_data = nullptr;
-     int                 x_T = 0, x_K = 0;
-     uint64_t            x_gen = 0;
-+    int                 x_frag = 0;   // 0: row-major f16 (hipBLASLt); else WMMA fragment order with x_frag rows (own GEMM, zero padded)
- };
- typedef std::tuple<int, int, int, int, int> lf_kq_key; // (device, rows per call, T or bucket, K, M)
- struct lf_kq_state {
 @@ -579,27 +622,8 @@ static int lf_blt_algo_mode() {
  }
  
@@ -496,7 +496,7 @@ index a1b296d51..48fb3fc6e 100644
      CUDA_CHECK(cudaGetLastError());
  #else
      GGML_UNUSED_VARS(ctx, src0, src1, dst, kk, y, c);
-@@ -2131,120 +2110,505 @@ bool ggml_cuda_lf_kq8_fp8_take(ggml_backend_cuda_context & ctx, const ggml_tenso
+@@ -2131,120 +2110,535 @@ bool ggml_cuda_lf_kq8_fp8_take(ggml_backend_cuda_context & ctx, const ggml_tenso
  #endif // defined(FRANK_HIPBLASLT)
  }
  
@@ -590,16 +590,18 @@ index a1b296d51..48fb3fc6e 100644
 -        if (it == g_lf_kq8_amax_marks.end() || it->second.prod != producer || it->second.gen != g_lf_fp8_graph_gen.load(std::memory_order_relaxed)) {
 -            return false;
 +// ------------------------------------------------------------------------------------------------------------------------------
-+// K1 f16's own GEMM (FRANK_KQ_BLAS_OWN=1, see lf_kq_own16_on): C[t][n] = sx * sum_k a[t][k] w[n][k] (+ c[t][n]) with
-+// __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12.  A block is BMF tokens x 128 weight rows: waves WM (tokens) x 2 (rows), each
-+// 64 tokens x 64 rows (4 x 4 fragments).  The activations come in WMMA fragment order (lf_o16_act_frag, rows padded with zeros to
-+// a multiple of BMF) and each wave reads its fragments from global memory; the weight is decoded slab by slab (64 values of K)
-+// into LDS by the block's threads, one unit (32 values of one row) a thread, from raw bytes loaded a slab ahead.  The grid runs
-+// the token tiles of one weight tile consecutively.  The tile, the WMMA operand order and the activation fragment order follow
-+// radiance's libr4d r4d_gemm_mxfp4a8_tiled (codeberg.org/StillDeadcode/radiance, libr4d/; Apache License 2.0, copyright Deadcode
-+// and the radiance contributors, see its LICENSE and NOTICE).  Changed from it: f16 operands with f32 accumulation instead of
-+// fp8 x MXFP4, the weight decoded from K-quant blocks slab by slab into LDS, the block height and weight tile chosen by batch
-+// size.  The decoders follow ggml's dequantize_row_q{4,5,6}_K / iq4_xs arithmetic (the values of lf_kq_dec_* / to_fp16).
++// K1's own f16 GEMM (FRANK_KQ_BLAS_OWN=1, see lf_kq_own16_on): y[t][n] = sx * sum_k a[t][k] w[n][k] (+ c[t][n]).
++// a is K1 f16's activation buffer (the values and layout of lf_kq_act_f16: row-major f16 with T rows and the batch's power-of-two
++// scale sx; the own GEMM writes it with lf_o16_act_f16), so the matmuls of one input share one conversion, the own GEMM's and K1
++// f16's alike.  A block computes BM tokens x BN weight rows with WM x WN
++// waves, a wave TM x TN tiles of 16 x 16 (the shapes: LF_O16_SHAPES; the choice: lf_o16_pick).  K runs in slabs of 64 values (a
++// quarter of a K-quant super-block): per slab the block decodes its weight rows (BN x 64) into LDS and copies its activation rows
++// (BM x 64, in one or two stages of 64 / 32 values) to LDS, unpadded rows with the 16-byte pieces under mma.cuh's XOR swizzle; then
++// every wave loads its operand tiles from LDS and accumulates in f32.  The next stage's activations and the next slab's raw
++// weight bytes are loaded into registers while the current WMMAs run.  Each output is one f32 accumulator chain over k in order
++// with one WMMA instruction (no split of K), so every shape gives the same bits.
++// The tiles, their swizzled LDS loads and the WMMA call (operand A the weight rows, B the tokens, as ggml's mmf does) are ggml's
++// mma.cuh (MIT).  The decoders follow ggml's dequantize_row_q{4,5,6}_K / iq4_xs arithmetic (the values of lf_kq_dec_* / to_fp16).
 +
 +typedef unsigned lf_o16_u2 __attribute__((ext_vector_type(2)));
 +typedef unsigned lf_o16_u4 __attribute__((ext_vector_type(4)));
@@ -787,141 +789,135 @@ index a1b296d51..48fb3fc6e 100644
 +    }
 +};
 +
-+// activations -> f16 with the batch scale (the values of lf_kq_act_f16) in fragment order: xf[((t/16)*(K/16) + k/16)*256 + lane*8
-+// + k%8], lane = t%16 + 16*((k/8)%2); rows T..Tp-1 zero.  slots = Tp/16 * K/16 * 32, one 8-half run a thread.
-+__global__ void lf_o16_act_frag(const float * __restrict__ x, half * __restrict__ xf, const unsigned int * __restrict__ gbits,
-+        float * __restrict__ sx, const int T, const int K, const int64_t slots) {
-+    const int64_t o = (int64_t) blockIdx.x * 256 + threadIdx.x;
-+    if (o >= slots) return;
-+    const float amax = __uint_as_float(*gbits);
-+    int e = 0;
-+    frexpf(amax, &e);
-+    const float inv = amax > 0.f ? ldexpf(1.f, 15 - e) : 0.f;
-+    const int ks = K / 16, lane = (int) (o & 31);
-+    const int64_t f = o >> 5;
-+    const int mt = (int) (f / ks), kst = (int) (f % ks);
-+    const int r = mt * 16 + (lane & 15), k = kst * 16 + (lane >> 4) * 8;
-+    lf_o16_u4 v = { 0u, 0u, 0u, 0u };
-+    if (r < T) {
-+        const float4 a = *(const float4 *) (x + (size_t) r * K + k), b = *(const float4 *) (x + (size_t) r * K + k + 4);
-+        v = lf_o16_u4{ lf_o16_pk(a.x * inv, a.y * inv), lf_o16_pk(a.z * inv, a.w * inv), lf_o16_pk(b.x * inv, b.y * inv), lf_o16_pk(b.z * inv, b.w * inv) };
-+    }
-+    *(lf_o16_u4 *) (xf + o * 8) = v;
-+    if (o == 0) *sx = amax > 0.f ? ldexpf(1.f, e - 15) : 1.f;
-+}
-+
-+// y[t][n] (ld ldy) = sx * sum_k xf[t][k] w[n][k] (+ c[t][n]) for t < T; Tp % (64 WM) == 0, N % (32 TN) == 0, K % 256 == 0.
-+// TN 4: 128 weight rows a block; TN 2: 64 (twice the blocks for small batches)
-+template <ggml_type TYPE, int WM, int TN>
-+__global__ __launch_bounds__(WM * 2 * 32) void lf_o16_gemm(
-+        const half * __restrict__ AT, const float * __restrict__ sxp, const uint8_t * __restrict__ W,
-+        float * __restrict__ y, const float * __restrict__ c, const int ldy, const int T, const int Tp, const int K) {
++// y[t][n] (ld ldy) = sx * sum_k x16[t][k] w[n][k] (+ c[t][n]) for t < T; N % BN == 0, K % 256 == 0.  Block b computes token tile
++// b % ntt of weight tile b / ntt: the token tiles of one weight tile run side by side and read its bytes from L2 (grouping the
++// token tiles in twos or fours measured the same).
++template <ggml_type TYPE, int TM, int TN, int WM, int WN, int AS>
++__global__ __launch_bounds__(WM * WN * 32) void lf_o16_gemm(
++        const half * __restrict__ x16, const float * __restrict__ sxp, const uint8_t * __restrict__ W,
++        float * __restrict__ y, const float * __restrict__ c, const int ldy, const int T, const int K, const int ntt) {
 +#if defined(RDNA4)
-+    constexpr int TM = 4, WN = 2, LBK = 64, NTHR = WM * WN * 32, BMF = WM * TM * 16;
-+    constexpr int NS = LBK / 16, STR = LBK + 8, BNF = WN * TN * 16;
++    typedef ggml_cuda_mma::tile<16, 8, half2>                                      tile_op;    // 16 rows x 16 values of K
++    typedef ggml_cuda_mma::tile<16, 16, float, ggml_cuda_mma::DATA_LAYOUT_J_MAJOR> tile_acc;   // i: weight row, j: token
 +    using Q = lf_o16_q<TYPE>;
-+    constexpr int BB = Q::BB, NR = Q::NR;
-+    constexpr int UT = BNF * (LBK / 64) * 2;                      // units a slab
-+    constexpr int NU = UT >= NTHR ? UT / NTHR : 1;
-+    static_assert(UT < NTHR || NU * NTHR == UT, "staging must split evenly");
-+    __shared__ __attribute__((aligned(16))) half sW[BNF * STR];
++    constexpr int NT = WM * WN * 32, BM = 16 * TM * WM, BN = 16 * TN * WN;
++    // K runs in slabs of SK values: the weight tile is decoded once a slab, the activation tile comes in AS stages of AK values.
++    // LDS rows are unpadded, their 16-byte pieces under mma.cuh's XOR swizzle; WL2 / AL2: the row pitches in half2.
++    constexpr int SK = 64, AK = SK / AS, WL2 = SK / 2, AL2 = AK / 2;
++    constexpr int NR = Q::NR, BB = Q::BB;
++    constexpr int AP = AK / 8, APT = BM * AP / NT, ARS = NT / AP;  // 16-byte pieces an activation row a stage, a thread; rows apart
++    constexpr int WU = 2 * BN, WUT = (WU + NT - 1) / NT;          // weight units a slab (two a row), units a thread
++    constexpr int WRS = NT / 2;                                   // rows between a thread's units
++    static_assert(AS == 1 || AS == 2, "one or two activation stages a slab");
++    static_assert(BM * AP % NT == 0 && NT % AP == 0, "the activation staging must split evenly");
++    __shared__ __attribute__((aligned(16))) half2 sA[BM * AL2];
++    __shared__ __attribute__((aligned(16))) half2 sW[BN * WL2];
 +
-+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
-+    const int wm = wave / WN, wn = wave % WN;
-+    const int col = lane & 15, kb8 = (lane >> 4) * 8;
-+    const int nm = Tp / BMF, mt = blockIdx.x % nm, nt = blockIdx.x / nm;
-+    const int m0 = mt * BMF, n0 = nt * BNF;
-+    const int ksteps = K / 16;
++    // blocks of (32, WM WN) threads: mma.cuh's tiles take the lane from threadIdx.x
++    const int wave = threadIdx.y, tid = wave * 32 + threadIdx.x;
++    const int wm = wave % WM, wn = wave / WM;
++    const int nsb = K / QK_K;
++    const int m0 = (blockIdx.x % ntt) * BM, n0 = (blockIdx.x / ntt) * BN;
 +
-+    const half * abase[TM];
++    // this thread's activation pieces: rows ar0 + it ARS of the tile, piece ap0 of the stage, as offsets from the block's first row;
++    // rows past T read row T - 1 (each output column depends on its own row only, and those outputs are not stored)
++    const int ar0 = tid / AP, ap0 = tid % AP;
++    const half * xb = x16 + (size_t) m0 * K;
++    unsigned aoff[APT];
 +#pragma unroll
-+    for (int i = 0; i < TM; ++i) {
-+        const int mtile = (m0 >> 4) + wm * TM + i;
-+        abase[i] = AT + (size_t) __builtin_amdgcn_readfirstlane(mtile) * ksteps * 256 + lane * 8;
-+    }
-+    const bool ustage = UT >= NTHR || tid < UT;
-+    int srow[NU], skc[NU], sh_[NU];
-+    const uint8_t * rowp[NU];
++    for (int it = 0; it < APT; ++it) aoff[it] = (unsigned) ((min(m0 + ar0 + it * ARS, T - 1) - m0) * K + ap0 * 8);
++    lf_o16_u4 ar[APT];
++    auto aload = [&](const int k) {
++        const half * xk = xb + k;
 +#pragma unroll
-+    for (int it = 0; it < NU; ++it) {
-+        const int u = (it * NTHR + tid) % UT, upr = 2 * (LBK / 64);
-+        srow[it] = u / upr;
-+        skc[it]  = (u % upr) / 2;
-+        sh_[it]  = u % 2;
-+        rowp[it] = W + (size_t) (n0 + srow[it]) * (K / QK_K) * BB;
-+    }
-+    lf_o16_u4 wr[NR * NU];
++        for (int it = 0; it < APT; ++it) ar[it] = *(const lf_o16_u4 *) (xk + aoff[it]);
++    };
++    auto astore = [&]() {
++#pragma unroll
++        for (int it = 0; it < APT; ++it) {
++            const int r = ar0 + it * ARS;
++            *(lf_o16_u4 *) &sA[ggml_cuda_mma::swizzle<AL2, half2>(r * AL2 + ap0 * 4, r)] = ar[it];
++        }
++    };
++    // this thread's weight units: rows wr0 + it WRS of the tile, half wh of the slab's 64 values (at Q::off0 / off1)
++    const int wr0 = tid >> 1, wh = tid & 1;
++    const uint8_t * wb = W + (size_t) n0 * nsb * BB;   // the block's first weight row
++    unsigned woff[WUT];
++#pragma unroll
++    for (int it = 0; it < WUT; ++it) woff[it] = (unsigned) ((wr0 + it * WRS) * nsb * BB);
++    auto wok = [&](const int it) { return WU % NT == 0 || it * NT + tid < WU; };
++    lf_o16_u4 wr[NR * WUT];
 +    auto wload = [&](const int k0) {
-+        if (!ustage) return;
++        const uint8_t * wk = wb + (size_t) (k0 / QK_K) * BB;
 +#pragma unroll
-+        for (int it = 0; it < NU; ++it) {
-+            const int kk = k0 + skc[it] * 64;
-+            Q::load(rowp[it] + (size_t) (kk >> 8) * BB, (kk >> 6) & 3, sh_[it], &wr[NR * it]);
++        for (int it = 0; it < WUT; ++it) {
++            if (wok(it)) Q::load(wk + woff[it], (k0 / 64) % 4, wh, &wr[NR * it]);
 +        }
 +    };
-+    auto wstage = [&](const int k0) {
-+        if (!ustage) return;
++    auto wstore = [&](const int k0) {
 +#pragma unroll
-+        for (int it = 0; it < NU; ++it) {
-+            const int kk = k0 + skc[it] * 64, cc = (kk >> 6) & 3;
++        for (int it = 0; it < WUT; ++it) {
++            if (!wok(it)) continue;
 +            lf_o16_u4 p[4];
-+            Q::decode(&wr[NR * it], cc, sh_[it], p);
-+            half * q0 = &sW[srow[it] * STR + skc[it] * 64 + Q::off0(sh_[it])];
-+            half * q1 = &sW[srow[it] * STR + skc[it] * 64 + Q::off1(sh_[it])];
-+            *(lf_o16_u4 *) q0 = p[0]; *(lf_o16_u4 *) (q0 + 8) = p[1];
-+            *(lf_o16_u4 *) q1 = p[2]; *(lf_o16_u4 *) (q1 + 8) = p[3];
++            Q::decode(&wr[NR * it], (k0 / 64) % 4, wh, p);
++            const int r = wr0 + it * WRS, q0 = Q::off0(wh) / 8, q1 = Q::off1(wh) / 8;
++            *(lf_o16_u4 *) &sW[ggml_cuda_mma::swizzle<WL2, half2>(r * WL2 + q0 * 4, r)]       = p[0];
++            *(lf_o16_u4 *) &sW[ggml_cuda_mma::swizzle<WL2, half2>(r * WL2 + q0 * 4 + 4, r)]   = p[1];
++            *(lf_o16_u4 *) &sW[ggml_cuda_mma::swizzle<WL2, half2>(r * WL2 + q1 * 4, r)]       = p[2];
++            *(lf_o16_u4 *) &sW[ggml_cuda_mma::swizzle<WL2, half2>(r * WL2 + q1 * 4 + 4, r)]   = p[3];
 +        }
 +    };
 +
-+    lf_o16_v8f acc[TM][TN];
-+#pragma unroll
-+    for (int i = 0; i < TM; ++i)
-+#pragma unroll
-+        for (int j = 0; j < TN; ++j) acc[i][j] = (lf_o16_v8f) (0.f);
-+
++    tile_acc acc[TM][TN];
++    aload(0);
 +    wload(0);
-+    for (int k0 = 0; k0 < K; k0 += LBK) {
-+        lf_o16_v8h af[TM][NS];
++    for (int k0 = 0; k0 < K; k0 += SK) {
 +#pragma unroll
-+        for (int i = 0; i < TM; ++i)
++        for (int h = 0; h < AS; ++h) {
++            astore();
++            if (h == 0) wstore(k0);
++            lf_o16_lds_barrier();
++            // the next stage's loads fly under this stage's WMMAs
++            if (k0 + (h + 1) * AK < K) aload(k0 + (h + 1) * AK);
++            if (h == AS - 1 && k0 + SK < K) wload(k0 + SK);
 +#pragma unroll
-+            for (int s = 0; s < NS; ++s) af[i][s] = *(const lf_o16_v8h *) (abase[i] + (size_t) k0 * 16 + s * 256);
-+        wstage(k0);
-+        lf_o16_lds_barrier();
-+        if (k0 + LBK < K) wload(k0 + LBK);   // the next slab's weight flies under this slab's WMMAs
++            for (int s = 0; s < AK / 16; ++s) {
++                tile_op wt[TN], at[TM];
 +#pragma unroll
-+        for (int s = 0; s < NS; ++s) {
-+            lf_o16_v8h wf[TN];
++                for (int j = 0; j < TN; ++j) {
++                    ggml_cuda_mma::load_ldmatrix_swizzled<WL2>(wt[j], sW, (wn * TN + j) * 16 * WL2 + (h * (AK / 16) + s) * 8);
++                }
 +#pragma unroll
-+            for (int j = 0; j < TN; ++j) wf[j] = *(const lf_o16_v8h *) &sW[(wn * TN * 16 + j * 16 + col) * STR + s * 16 + kb8];
-+            __builtin_amdgcn_sched_barrier(0);
++                for (int i = 0; i < TM; ++i) ggml_cuda_mma::load_ldmatrix_swizzled<AL2>(at[i], sA, (wm * TM + i) * 16 * AL2 + s * 8);
 +#pragma unroll
-+            for (int i = 0; i < TM; ++i)
++                for (int i = 0; i < TM; ++i) {
 +#pragma unroll
-+                for (int j = 0; j < TN; ++j)
-+                    acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(wf[j], af[i][s], acc[i][j]);
++                    for (int j = 0; j < TN; ++j) ggml_cuda_mma::mma(acc[i][j], wt[j], at[i]);
++                }
++            }
++            lf_o16_lds_barrier();
 +        }
-+        lf_o16_lds_barrier();
 +    }
 +
-+    // a lane holds token m0 + 64 wm + 16 i + col and eight consecutive weight rows of fragment j
++    // a lane holds token get_j(0) and the eight consecutive weight rows get_i(0) .. get_i(0) + 7 of each tile
++    static_assert(tile_acc::ne == 8, "eight accumulators a lane");
 +    const float sc = *sxp;
 +#pragma unroll
 +    for (int i = 0; i < TM; ++i) {
-+        const int m = m0 + wm * TM * 16 + i * 16 + col;
-+        if (m >= T) continue;
++        const int t = m0 + (wm * TM + i) * 16 + tile_acc::get_j(0);
++        if (t >= T) continue;
 +#pragma unroll
 +        for (int j = 0; j < TN; ++j) {
-+            const int nb = n0 + wn * TN * 16 + j * 16 + kb8;
-+            float4 o0, o1;
-+            o0.x = acc[i][j][0] * sc; o0.y = acc[i][j][1] * sc; o0.z = acc[i][j][2] * sc; o0.w = acc[i][j][3] * sc;
-+            o1.x = acc[i][j][4] * sc; o1.y = acc[i][j][5] * sc; o1.z = acc[i][j][6] * sc; o1.w = acc[i][j][7] * sc;
++            const int n = n0 + (wn * TN + j) * 16 + tile_acc::get_i(0);
++            const float * a = acc[i][j].x;
++            float4 o0 = make_float4(a[0] * sc, a[1] * sc, a[2] * sc, a[3] * sc);
++            float4 o1 = make_float4(a[4] * sc, a[5] * sc, a[6] * sc, a[7] * sc);
 +            if (c != nullptr) {
-+                const float4 c0 = *(const float4 *) (c + (size_t) m * ldy + nb), c1 = *(const float4 *) (c + (size_t) m * ldy + nb + 4);
++                const float4 c0 = *(const float4 *) (c + (size_t) t * ldy + n), c1 = *(const float4 *) (c + (size_t) t * ldy + n + 4);
 +                o0.x += c0.x; o0.y += c0.y; o0.z += c0.z; o0.w += c0.w;
 +                o1.x += c1.x; o1.y += c1.y; o1.z += c1.z; o1.w += c1.w;
 +            }
-+            float4 * out = (float4 *) (y + (size_t) m * ldy + nb);
++            float4 * out = (float4 *) (y + (size_t) t * ldy + n);
 +            out[0] = o0; out[1] = o1;
          }
      }
@@ -935,7 +931,7 @@ index a1b296d51..48fb3fc6e 100644
 -    GGML_UNUSED_VARS(ctx, producer);
 -    return false;
 -#endif // defined(FRANK_HIPBLASLT)
-+    GGML_UNUSED_VARS(AT, sxp, W, y, c, ldy, T, Tp, K);
++    GGML_UNUSED_VARS(x16, sxp, W, y, c, ldy, T, K, ntt);
 +    NO_DEVICE_CODE;
 +#endif // defined(RDNA4)
  }
@@ -949,72 +945,110 @@ index a1b296d51..48fb3fc6e 100644
 -#else
 -    return false;
 -#endif // defined(FRANK_HIPBLASLT)
-+// the block height (tokens) with the least work: padded tokens times the relative cost a token of the block height (gfx1201,
-+// Qwen3.8-27B shapes: 256-token blocks about 2% slower a token than 512, 128-token blocks about 12% slower)
-+static int lf_o16_bmf(const int T) {
-+    static const int fixed = getenv("FRANK_KQ_BLAS_OWN_BMF") ? atoi(getenv("FRANK_KQ_BLAS_OWN_BMF")) : 0;
-+    if (fixed == 128 || fixed == 256 || fixed == 512) return fixed;
-+    const int   h[3] = { 512, 256, 128 };
-+    const float f[3] = { 1.00f, 1.02f, 1.12f };
-+    int best = 128; float bc = 1e30f;
-+    for (int i = 0; i < 3; ++i) {
-+        const float cost = (float) ((T + h[i] - 1) / h[i] * h[i]) * f[i];
-+        if (cost < bc) { bc = cost; best = h[i]; }
++// The block shapes (TM, TN, WM, WN, AS): BM = 16 TM WM tokens x BN = 16 TN WN weight rows with WM WN waves, AS activation stages a
++// slab; LDS BM x 128 / AS + BN x 128 bytes.  Chosen from about 45 shapes by sweeps (gfx1201, Qwen3.8-27B's linear shapes, the four
++// weight types, 128..2048 tokens; the sums over a batch's matmuls): per batch size one shape served all four types within 1..5%.
++#define LF_O16_SHAPES(X) \
++    X(2, 2, 4, 2, 1)   /* 0: 128 x 64,   8 waves */ \
++    X(2, 2, 6, 2, 1)   /* 1: 192 x 64,  12 waves */ \
++    X(2, 2, 4, 4, 1)   /* 2: 128 x 128, 16 waves */ \
++    X(2, 2, 10, 2, 1)  /* 3: 320 x 64,  20 waves */ \
++    X(4, 4, 4, 2, 2)   /* 4: 256 x 128,  8 waves, two activation stages */ \
++    X(2, 2, 4, 1, 1)   /* 5: 128 x 32,   4 waves */ \
++    X(2, 2, 2, 4, 1)   /* 6: 64 x 128,   8 waves */ \
++    X(4, 2, 4, 4, 1)   /* 7: 256 x 128, 16 waves */ \
++    X(2, 4, 8, 1, 1)   /* 8: 256 x 64,   8 waves */
++struct lf_o16_shape { int tm, tn, wm, wn, as; };
++#define LF_O16_ROW(tm, tn, wm, wn, as) { tm, tn, wm, wn, as },
++static constexpr lf_o16_shape lf_o16_shapes[] = { LF_O16_SHAPES(LF_O16_ROW) };
++#undef LF_O16_ROW
++constexpr int LF_O16_NSHAPES = (int) (sizeof(lf_o16_shapes) / sizeof(lf_o16_shapes[0]));
++
++// FRANK_KQ_BLAS_OWN_SHAPE=TMxTN/WMxWN[a2] fixes the block shape (diagnostics; one of LF_O16_SHAPES, used where its BN divides the
++// weight rows; a2: two activation stages): e.g. 4x4/4x2a2 is 256 tokens x 128 rows in 8 waves
++static int lf_o16_shape_fixed() {
++    static const int s = [] {
++        const char * e = getenv("FRANK_KQ_BLAS_OWN_SHAPE");
++        int a = 0, b = 0, c = 0, d = 0, n = 0;
++        if (e == nullptr || sscanf(e, "%dx%d/%dx%d%n", &a, &b, &c, &d, &n) != 4) return -1;
++        const int as = strcmp(e + n, "a2") == 0 ? 2 : 1;
++        for (int i = 0; i < LF_O16_NSHAPES; ++i) {
++            const lf_o16_shape & h = lf_o16_shapes[i];
++            if (h.tm == a && h.tn == b && h.wm == c && h.wn == d && h.as == as) return i;
++        }
++        GGML_LOG_WARN("FRANK_KQ_BLAS_OWN_SHAPE=%s: not a shape of this build, ignored\n", e);
++        return -1;
++    }();
++    return s;
++}
++// the block shape for T tokens, N weight rows (N % 128 == 0) and the weight type.  Up to 512 tokens a table by batch size; past it
++// the least padded work (T rounded up to BM) times each shape's measured cost a token relative to the 256-token tile.  Weights of
++// fewer than 4096 rows (k / v projections: 1024 rows) take the shapes that give them more blocks; Q6_K, whose decoding costs the
++// most, takes 256 x 64 blocks at 193..256 tokens (5% faster there than 128 x 128).
++static int lf_o16_pick(const int T, const int N, const ggml_type type) {
++    const int f = lf_o16_shape_fixed();
++    if (f >= 0 && N % (16 * lf_o16_shapes[f].tn * lf_o16_shapes[f].wn) == 0) return f;
++    const bool small = N < 4096;
++    if (T <= 512) {
++        if (small) return T <= 128 ? 5 : T <= 192 ? 6 : T <= 256 ? 0 : T <= 384 ? 1 : 2;
++        if (type == GGML_TYPE_Q6_K && T > 192 && T <= 256) return 8;
++        return T <= 128 ? 0 : T <= 192 ? 1 : T <= 256 ? 2 : T <= 320 ? 3 : T <= 384 ? 2 : 4;
++    }
++    struct { int shape, bm; float cost; } c[4] = { { small ? 7 : 4, 256, 1.00f }, { 2, 128, small ? 1.05f : 1.10f },
++                                                    { 3, 320, small ? 1.08f : 1.13f }, { 1, 192, small ? 1.05f : 1.10f } };
++    int best = c[0].shape; float bc = 1e30f;
++    for (const auto & e : c) {
++        const float w = (float) ((T + e.bm - 1) / e.bm * e.bm) * e.cost;
++        if (w < bc) { bc = w; best = e.shape; }
 +    }
 +    return best;
 +}
++
++template <ggml_type TYPE, int TM, int TN, int WM, int WN, int AS>
++static void lf_o16_run(const half * x16, const float * sx, const uint8_t * w, float * y, const float * c, const int ldy,
++        const int T, const int K, const int N, cudaStream_t stream) {
++    constexpr int BM = 16 * TM * WM, BN = 16 * TN * WN;
++    const int ntt = (T + BM - 1) / BM;
++    lf_o16_gemm<TYPE, TM, TN, WM, WN, AS><<<(unsigned) (ntt * (N / BN)), dim3(32, WM * WN), 0, stream>>>(x16, sx, w, y, c, ldy, T, K, ntt);
++}
++template <ggml_type TYPE>
++static void lf_o16_launch(const int shape, const half * x16, const float * sx, const void * w, float * y, const float * c,
++        const int ldy, const int T, const int K, const int N, cudaStream_t stream) {
++    int i = 0;
++#define LF_O16_CASE(tm, tn, wm, wn, as) \
++    if (shape == i++) { lf_o16_run<TYPE, tm, tn, wm, wn, as>(x16, sx, (const uint8_t *) w, y, c, ldy, T, K, N, stream); return; }
++    LF_O16_SHAPES(LF_O16_CASE)
++#undef LF_O16_CASE
++    GGML_ABORT("FRANK_KQ_BLAS_OWN: shape %d", shape);
++}
++
++// K1 f16's activation buffer (the values and layout of lf_kq_act_f16: x * 2^(15 - e) in f16, row-major, the scale in *sx), eight
++// values a thread: the own GEMM's small batches have too few rows for lf_kq_act_f16's block a row (256 x 5120: 4.8 us, not 15.9)
++__global__ void lf_o16_act_f16(const float * __restrict__ x, half * __restrict__ xh, const unsigned int * __restrict__ gbits,
++        float * __restrict__ sx, const int64_t pieces) {
++    const int64_t o = (int64_t) blockIdx.x * 256 + threadIdx.x;
++    if (o >= pieces) return;
++    const float amax = __uint_as_float(*gbits);
++    int e = 0;
++    frexpf(amax, &e);
++    const float inv = amax > 0.f ? ldexpf(1.f, 15 - e) : 0.f;
++    const float4 a = *(const float4 *) (x + o * 8), b = *(const float4 *) (x + o * 8 + 4);
++    *(lf_o16_u4 *) (xh + o * 8) = lf_o16_u4{ lf_o16_pk(a.x * inv, a.y * inv), lf_o16_pk(a.z * inv, a.w * inv),
++                                             lf_o16_pk(b.x * inv, b.y * inv), lf_o16_pk(b.z * inv, b.w * inv) };
++    if (o == 0) *sx = amax > 0.f ? ldexpf(1.f, e - 15) : 1.f;
+ }
+ 
++// the scratch: K1 f16's layout (f16 activations of T rows | batch scale), room for T rounded up to 512 tokens so that batches of
++// varying size do not grow it again and again
 +static size_t lf_kq_own16_bytes(const int T, const int K) {
-+    const int Tp = (T + 511) / 512 * 512;   // room for any block height
-+    return lf_kq_align((size_t) Tp * K * 2) + LF_KQ_SCALE_BYTES;
++    const int Tr = (T + 511) / 512 * 512;
++    return lf_kq_align((size_t) Tr * K * 2) + LF_KQ_SCALE_BYTES;
 +}
 +static bool lf_kq_own16_ready(cudaStream_t stream, const int T, const int K) {
 +    lf_kq_state & st = lf_kq();
 +    std::lock_guard<std::mutex> lock(st.mutex);
 +    auto it = st.scratch.find(stream);
 +    return it != st.scratch.end() && it->second.size >= lf_kq_own16_bytes(T, K);
- }
- 
-+// 64-row weight tiles when 128-row tiles would make fewer than 96 blocks (gfx1201, Qwen3.8-27B shapes: a 5120-row weight 8..11%
-+// faster at 128..512 tokens, a 1024-row one twice as fast; 128-row tiles 5..10% faster from about 96 blocks up)
-+// FRANK_KQ_BLAS_OWN_TN=2 / 4 fixes the weight tile (diagnostics; 4 also turns off the one-tile heights below)
-+static int lf_o16_tn_fixed() {
-+    static const int t = getenv("FRANK_KQ_BLAS_OWN_TN") ? atoi(getenv("FRANK_KQ_BLAS_OWN_TN")) : 0;
-+    return t;
-+}
-+// one: a batch of up to 448 tokens as one block height of Tp (a multiple of 64) with 64-row tiles (gfx1201, Qwen3.8-27B
-+// shapes: 192 tokens 13% faster than padded to 256, 320 12% faster than three 128-token tiles, 384 6%, 448 5%)
-+template <ggml_type TYPE>
-+static void lf_o16_launch(const int bmf, const bool one, const half * xf, const float * sx, const void * w, float * y, const float * c,
-+        const int ldy, const int T, const int Tp, const int K, const int N, cudaStream_t stream) {
-+    const uint8_t * wq = (const uint8_t *) w;
-+    const int tn_fixed = lf_o16_tn_fixed();
-+    if (one) {
-+        const unsigned grid = (unsigned) (N / 64);
-+        switch (Tp / 64) {
-+            case 2:  lf_o16_gemm<TYPE, 2, 2><<<grid, 128, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K); break;
-+            case 3:  lf_o16_gemm<TYPE, 3, 2><<<grid, 192, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K); break;
-+            case 4:  lf_o16_gemm<TYPE, 4, 2><<<grid, 256, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K); break;
-+            case 5:  lf_o16_gemm<TYPE, 5, 2><<<grid, 320, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K); break;
-+            case 6:  lf_o16_gemm<TYPE, 6, 2><<<grid, 384, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K); break;
-+            default: lf_o16_gemm<TYPE, 7, 2><<<grid, 448, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K); break;
-+        }
-+        return;
-+    }
-+    if (tn_fixed == 2 || (tn_fixed != 4 && (int64_t) (N / 128) * (Tp / bmf) < 96)) {
-+        // 64-row tiles come in block heights of 128 and 256 tokens: a batch padded to a multiple of 512 runs in 256-token tiles
-+        // (the fragment-order activations do not depend on the block height, only Tp has to be a multiple of it)
-+        const int h = bmf == 128 ? 128 : 256;
-+        const unsigned grid = (unsigned) ((N / 64) * (Tp / h));
-+        if (h == 256) lf_o16_gemm<TYPE, 4, 2><<<grid, 256, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K);
-+        else          lf_o16_gemm<TYPE, 2, 2><<<grid, 128, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K);
-+        return;
-+    }
-+    const unsigned grid = (unsigned) ((N / 128) * (Tp / bmf));
-+    switch (bmf) {
-+        case 512: lf_o16_gemm<TYPE, 8, 4><<<grid, 512, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K); break;
-+        case 256: lf_o16_gemm<TYPE, 4, 4><<<grid, 256, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K); break;
-+        default:  lf_o16_gemm<TYPE, 2, 4><<<grid, 128, 0, stream>>>(xf, sx, wq, y, c, ldy, T, Tp, K); break;
-+    }
 +}
 +
 +static void lf_kq_own16_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, float * y,
@@ -1022,11 +1056,6 @@ index a1b296d51..48fb3fc6e 100644
 +    cudaStream_t stream = ctx.stream();
 +    const int K = (int) src0->ne[0], N = (int) src0->ne[1];
 +    const int T = (int) (src1->ne[1] * src1->ne[2] * src1->ne[3]);
-+    // up to 448 tokens (and at least 128, the own GEMM's floor) one block height of Tp = T rounded up to 64; else lf_o16_bmf's
-+    static const bool bmf_fixed = getenv("FRANK_KQ_BLAS_OWN_BMF") != nullptr;
-+    const bool one = !bmf_fixed && lf_o16_tn_fixed() != 4 && T <= 448;
-+    const int bmf = one ? (T + 63) / 64 * 64 : lf_o16_bmf(T);
-+    const int Tp  = (T + bmf - 1) / bmf * bmf;
 +    const float * x = (const float *) src1->data;
 +
 +    lf_kq_state & st = lf_kq();
@@ -1042,27 +1071,28 @@ index a1b296d51..48fb3fc6e 100644
 +        sc.size  = need;
 +        sc.x_src = nullptr;
 +    }
-+    half  * xf    = (half *) sc.ptr;
-+    float * sx    = (float *) (sc.ptr + lf_kq_align((size_t) Tp * K * 2));
++    half  * x16   = (half *) sc.ptr;
++    float * sx    = (float *) (sc.ptr + lf_kq_align((size_t) T * K * 2));
 +    unsigned int * gbits = (unsigned int *) (sx + 16);
 +
-+    // activations -> f16 in fragment order, once per input, graph and block height (FRANK_KQ_BLAS_SHARE=0: every call)
++    // activations -> f16 with the batch scale, once per input and graph and shared with K1 f16 (FRANK_KQ_BLAS_SHARE=0: every call)
 +    static const bool share = !getenv("FRANK_KQ_BLAS_SHARE") || atoi(getenv("FRANK_KQ_BLAS_SHARE")) != 0;
 +    const ggml_tensor * x_src = src1;
 +    while (x_src->view_src != nullptr) x_src = x_src->view_src;
 +    const uint64_t gen = g_lf_kq_graph_gen.load(std::memory_order_relaxed);
-+    if (!share || sc.x_src != x_src || sc.x_data != src1->data || sc.x_T != T || sc.x_K != K || sc.x_gen != gen || sc.x_frag != Tp) {
++    if (!share || sc.x_src != x_src || sc.x_data != src1->data || sc.x_T != T || sc.x_K != K || sc.x_gen != gen) {
 +        CUDA_CHECK(cudaMemsetAsync(gbits, 0, sizeof(unsigned int), stream));
 +        lf_kq_act_amax<<<T, 256, 0, stream>>>(x, K, gbits);
-+        const int64_t slots = (int64_t) (Tp / 16) * (K / 16) * 32;
-+        lf_o16_act_frag<<<(unsigned) ((slots + 255) / 256), 256, 0, stream>>>(x, xf, gbits, sx, T, K, slots);
-+        sc.x_src = x_src; sc.x_data = src1->data; sc.x_T = T; sc.x_K = K; sc.x_gen = gen; sc.x_frag = Tp;
++        const int64_t pieces = (int64_t) T * K / 8;
++        lf_o16_act_f16<<<(unsigned) ((pieces + 255) / 256), 256, 0, stream>>>(x, x16, gbits, sx, pieces);
++        sc.x_src = x_src; sc.x_data = src1->data; sc.x_T = T; sc.x_K = K; sc.x_gen = gen;
 +    }
++    const int shape = lf_o16_pick(T, N, src0->type);
 +    switch (src0->type) {
-+        case GGML_TYPE_Q4_K: lf_o16_launch<GGML_TYPE_Q4_K>(bmf, one, xf, sx, src0->data, y, c, N, T, Tp, K, N, stream); break;
-+        case GGML_TYPE_Q5_K: lf_o16_launch<GGML_TYPE_Q5_K>(bmf, one, xf, sx, src0->data, y, c, N, T, Tp, K, N, stream); break;
-+        case GGML_TYPE_Q6_K: lf_o16_launch<GGML_TYPE_Q6_K>(bmf, one, xf, sx, src0->data, y, c, N, T, Tp, K, N, stream); break;
-+        case GGML_TYPE_IQ4_XS: lf_o16_launch<GGML_TYPE_IQ4_XS>(bmf, one, xf, sx, src0->data, y, c, N, T, Tp, K, N, stream); break;
++        case GGML_TYPE_Q4_K:   lf_o16_launch<GGML_TYPE_Q4_K>  (shape, x16, sx, src0->data, y, c, N, T, K, N, stream); break;
++        case GGML_TYPE_Q5_K:   lf_o16_launch<GGML_TYPE_Q5_K>  (shape, x16, sx, src0->data, y, c, N, T, K, N, stream); break;
++        case GGML_TYPE_Q6_K:   lf_o16_launch<GGML_TYPE_Q6_K>  (shape, x16, sx, src0->data, y, c, N, T, K, N, stream); break;
++        case GGML_TYPE_IQ4_XS: lf_o16_launch<GGML_TYPE_IQ4_XS>(shape, x16, sx, src0->data, y, c, N, T, K, N, stream); break;
 +        default: GGML_ABORT("FRANK_KQ_BLAS_OWN: type %s", ggml_type_name(src0->type));
 +    }
 +    CUDA_CHECK(cudaGetLastError());
@@ -1090,7 +1120,7 @@ index a1b296d51..48fb3fc6e 100644
      if (lf_kq_mode() == 2) {
          if (K % 4 != 0) return false;
          if (!ggml_cuda_lf_kq_fp8_ready(src0, ctx.device, (int) M, (int) T, (int) K)) {
-@@ -2253,6 +2617,13 @@ bool ggml_cuda_lf_kq_blas_supported(ggml_backend_cuda_context & ctx, const ggml_
+@@ -2253,6 +2647,13 @@ bool ggml_cuda_lf_kq_blas_supported(ggml_backend_cuda_context & ctx, const ggml_
          }
          return true;
      }
@@ -1104,7 +1134,7 @@ index a1b296d51..48fb3fc6e 100644
      if (!lf_kq_ready(ctx.device, ctx.stream(), lf_kq_chunk_rows((int) M, (int) K), (int) T, (int) K, (int) M)) {
          // first use probes / allocates / tunes: not while a graph is being captured
          hipStreamCaptureStatus st = hipStreamCaptureStatusNone;
-@@ -2296,12 +2667,16 @@ bool ggml_cuda_lf_kq8_mul_mat_add(ggml_backend_cuda_context & ctx, ggml_tensor *
+@@ -2296,12 +2697,16 @@ bool ggml_cuda_lf_kq8_mul_mat_add(ggml_backend_cuda_context & ctx, ggml_tensor *
      const char * c = (const char *) other->data, * d = (const char *) add->data;
      const size_t n = ggml_nbytes(add);
      if (c != d && c < d + n && d < c + n) return false;
@@ -1122,7 +1152,7 @@ index a1b296d51..48fb3fc6e 100644
          lf_kq_f16_mul_mat(ctx, src0, src1, mm, (float *) add->data, (const float *) other->data);
          return true;
      }
-@@ -2315,6 +2690,10 @@ bool ggml_cuda_lf_kq8_mul_mat_add(ggml_backend_cuda_context & ctx, ggml_tensor *
+@@ -2315,6 +2720,10 @@ bool ggml_cuda_lf_kq8_mul_mat_add(ggml_backend_cuda_context & ctx, ggml_tensor *
  
  void ggml_cuda_lf_kq_blas_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
  #if defined(FRANK_HIPBLASLT)
@@ -1133,7 +1163,7 @@ index a1b296d51..48fb3fc6e 100644
      if (lf_kq_mode() == 2) {
          ggml_cuda_lf_kq_fp8_mul_mat(ctx, src0, src1, dst, (float *) dst->data, nullptr);
          return;
-@@ -2332,6 +2711,10 @@ static void lf_kq_f16_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+@@ -2332,6 +2741,10 @@ static void lf_kq_f16_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
          float * y, const float * c) {
  #if defined(FRANK_HIPBLASLT)
      GGML_UNUSED(dst);
@@ -1144,21 +1174,7 @@ index a1b296d51..48fb3fc6e 100644
      cudaStream_t stream = ctx.stream();
      const int K  = (int) src0->ne[0], M = (int) src0->ne[1];
      const int T  = (int) (src1->ne[1] * src1->ne[2] * src1->ne[3]);
-@@ -2365,11 +2748,11 @@ static void lf_kq_f16_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
-     const ggml_tensor * x_src = src1;
-     while (x_src->view_src != nullptr) x_src = x_src->view_src;
-     const uint64_t gen = g_lf_kq_graph_gen.load(std::memory_order_relaxed);
--    if (!share || sc.x_src != x_src || sc.x_data != src1->data || sc.x_T != T || sc.x_K != K || sc.x_gen != gen) {
-+    if (!share || sc.x_src != x_src || sc.x_data != src1->data || sc.x_T != T || sc.x_K != K || sc.x_gen != gen || sc.x_frag != 0) {
-         CUDA_CHECK(cudaMemsetAsync(gbits, 0, sizeof(unsigned int), stream));
-         lf_kq_act_amax<<<T, 256, 0, stream>>>(x, K, gbits);
-         lf_kq_act_f16<<<T, 256, 0, stream>>>(x, x16, gbits, sx, K);
--        sc.x_src = x_src; sc.x_data = src1->data; sc.x_T = T; sc.x_K = K; sc.x_gen = gen;
-+        sc.x_src = x_src; sc.x_data = src1->data; sc.x_T = T; sc.x_K = K; sc.x_gen = gen; sc.x_frag = 0;
-     }
-     lf_kq_alpha<<<(M + 255) / 256, 256, 0, stream>>>(sx, av, M);
- 
-@@ -2622,6 +3005,22 @@ const char * ggml_cuda_lf_kq_blas_algos_string() {
+@@ -2622,6 +3035,22 @@ const char * ggml_cuda_lf_kq_blas_algos_string() {
  #endif // defined(FRANK_HIPBLASLT)
  }
  
