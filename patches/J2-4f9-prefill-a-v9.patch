@@ -247,10 +247,22 @@ index ec0bea314..9cd445502 100644
  // gfx11 (RDNA3/RDNA3.5) first-gen WMMA variant - same contract as the gfx12 entry above.
  bool ggml_cuda_op_gated_delta_net_chunked_bf16_gfx11(ggml_backend_cuda_context & ctx, ggml_tensor * dst, float * state_d_ext = nullptr, int64_t n_tokens_limit = 0);
 diff --git a/ggml/src/ggml-cuda/gated_delta_net_chunked_bf16.cu b/ggml/src/ggml-cuda/gated_delta_net_chunked_bf16.cu
-index 1f39c44d6..2ca266b63 100644
+index 1f39c44d6..70da2a263 100644
 --- a/ggml/src/ggml-cuda/gated_delta_net_chunked_bf16.cu
 +++ b/ggml/src/ggml-cuda/gated_delta_net_chunked_bf16.cu
-@@ -149,6 +149,16 @@ __device__ __forceinline__ gdn_v8bf gdn_fragGo32(const float * base, unsigned of
+@@ -20,6 +20,11 @@
+ // to llama.cpp: fp32 tensor I/O (converted to bf16 on the fly), llama.cpp layouts, the
+ // h % H_k GQA mapping, and a compact bf16 A scratch.
+ //
++// libr4d is distributed by radiance under the Apache License 2.0 (codeberg.org/StillDeadcode/radiance, libr4d/;
++// copyright Deadcode and the radiance contributors, see its LICENSE and NOTICE).  Changed by this patch set (J2):
++// q / k / v may arrive as bf16 from the prefill conv, the kkt kernel hands its gate cumsum to the scan, and the scan
++// holds its LDS to 42 KB and reads the next chunk's gates and A fragments one chunk ahead.
++//
+ // Accuracy model (the same as the fork's BF16 KV-cache flash-attn and PR#26001): bf16/FP16
+ // operands, fp32 accumulation, fp32 prefix sums, fp32 H-state carried across chunks, bf16
+ // only for the staged WMMA operands. Near-lossless, NOT bit-exact -- the dispatch in
+@@ -149,6 +154,16 @@ __device__ __forceinline__ gdn_v8bf gdn_fragGo32(const float * base, unsigned of
  __device__ __forceinline__ gdn_v8bf gdn_fragO(const char * sb, unsigned off) {
      return gdn_fragP((const unsigned short *) (sb + off));
  }
@@ -267,7 +279,7 @@ index 1f39c44d6..2ca266b63 100644
  #define GDN_LDSOPAQUE(x) asm("" : "+v"(x))
  // byte offset of buffer[base + lo][4*hi] from the base of the shared block
  #define GDN_ROWO(buf, pitch, base) \
-@@ -209,13 +219,14 @@ __device__ __forceinline__ void gdn_kkt_tile(int ti, int * mt, int * nt) {
+@@ -209,13 +224,14 @@ __device__ __forceinline__ void gdn_kkt_tile(int ti, int * mt, int * nt) {
      *mt = m; *nt = n + m;
  }
  
@@ -284,7 +296,7 @@ index 1f39c44d6..2ca266b63 100644
          int64_t H, int64_t H_k, int64_t n_tokens, int64_t n_seqs,
          int64_t sq1, int64_t sq2, int64_t sq3, int dbg)
  {
-@@ -229,8 +240,8 @@ gdn_bf16_kkt_cuda(
+@@ -229,8 +245,8 @@ gdn_bf16_kkt_cuda(
      const int rows = min(GDN_BF16_BT, (int) n_tokens - c0);
      const int lim = rows - 1;
  
@@ -295,7 +307,7 @@ index 1f39c44d6..2ca266b63 100644
  
      // ---- zero the parts no store ever reaches: the upper tiles of A and the TMP slack ----
      for (int i = tid; i < GDN_BF16_BT * GDN_BF16_AP / 8; i += GDN_BF16_KKT_NTHR)
-@@ -250,8 +261,8 @@ gdn_bf16_kkt_cuda(
+@@ -250,8 +266,8 @@ gdn_bf16_kkt_cuda(
              const unsigned on = gdn_rowGo(krow, nt * 16, lim, lane);
  #pragma unroll
              for (int sk = 0; sk < GDN_BF16_KD / 16; ++sk)
@@ -306,7 +318,7 @@ index 1f39c44d6..2ca266b63 100644
          }
      }
  
-@@ -275,6 +286,10 @@ gdn_bf16_kkt_cuda(
+@@ -275,6 +291,10 @@ gdn_bf16_kkt_cuda(
              for (int t = 0; t < GDN_BF16_BT; ++t) { acc += s.gb[t]; s.gcs[t] = acc; }
          }
          GDN_BAR();
@@ -317,7 +329,7 @@ index 1f39c44d6..2ca266b63 100644
  
          // ---- scale, mask and place the gram as the strictly lower half of A ------------------
          // Tile (mt, nt) holds P[m][n]; the element written is A[n][m] = bt[n] gv[m] P[m][n],
-@@ -400,15 +415,28 @@ gdn_bf16_kkt_cuda(
+@@ -400,15 +420,28 @@ gdn_bf16_kkt_cuda(
  // chunk_scan (bf16): the recurrent state lives in WMMA accumulators across the whole chunk
  // loop. grid (VD/BV, H, n_seqs); each block owns a BV=64-wide v slice of one v-head.
  // ---------------------------------------------------------------------------------------------
@@ -353,7 +365,7 @@ index 1f39c44d6..2ca266b63 100644
  
  #define GDN_BF16_PFW 8                   // shorts staged per lane per step
  #define GDN_BF16_PFV_T uint4
-@@ -416,17 +444,19 @@ struct gdn_bf16_scan_smem {
+@@ -416,17 +449,19 @@ struct gdn_bf16_scan_smem {
  #define GDN_BF16_NKB (GDN_BF16_BT * GDN_BF16_KD / (GDN_BF16_NTHR * GDN_BF16_PFW))
  #define GDN_BF16_NVB (GDN_BF16_BT * GDN_BF16_BV / (GDN_BF16_NTHR * GDN_BF16_PFW))
  
@@ -376,7 +388,7 @@ index 1f39c44d6..2ca266b63 100644
          int64_t H, int64_t H_k, int64_t n_tokens, int64_t n_seqs,
          int64_t sq1, int64_t sq2, int64_t sq3,
          int64_t sv1, int64_t sv2, int64_t sv3,
-@@ -469,12 +499,11 @@ gdn_bf16_scan_cuda(
+@@ -469,12 +504,11 @@ gdn_bf16_scan_cuda(
  #define SWRITE()                                                                                  \
      do {                                                                                          \
          _Pragma("unroll") for (int t = 0; t < GDN_BF16_NST; ++t) {                                \
@@ -390,7 +402,7 @@ index 1f39c44d6..2ca266b63 100644
  
      // ---- staging indices: WAVE-UNIFORM rows + loop-invariant lane columns (r4d PFV=4) -------
      const int wu = __builtin_amdgcn_readfirstlane(tid >> 5);
-@@ -494,24 +523,18 @@ gdn_bf16_scan_cuda(
+@@ -494,24 +528,18 @@ gdn_bf16_scan_cuda(
      // the chunk-uniform half: clamp the row reads to the last real token
  #define GDN_BF16_PFBASE(CH)                                                                       \
          const int pc0_ = (CH) * GDN_BF16_BT, prl_ = min(GDN_BF16_BT, (int) n_tokens - pc0_) - 1;  \
@@ -419,7 +431,7 @@ index 1f39c44d6..2ca266b63 100644
              }                                                                                     \
          } while (0)
  #define GDN_BF16_PREFETCH(CH)                                                                     \
-@@ -527,44 +550,53 @@ gdn_bf16_scan_cuda(
+@@ -527,44 +555,53 @@ gdn_bf16_scan_cuda(
              *(uint2 *) (dp_ + 4) = make_uint2((val).z, (val).w);                                  \
          } while (0)
  
@@ -469,7 +481,9 @@ index 1f39c44d6..2ca266b63 100644
          float * obase = attn_out + ((int64_t) nq * n_tokens + c0) * H * GDN_BF16_VD + (int64_t) h * GDN_BF16_VD;
  
 -        // ---- gates: chunk-local inclusive cumsum, then ge/gv/rs/bt (flat on padding) --------
--        if (tid < GDN_BF16_BT) {
++        // ---- gates: the chunk-local inclusive cumsum (the kkt's, flat on padding), then ge/gv/rs/bt
++        SWRITE();   // the state written in the previous chunk's registers (after barrier (4): W / A reads are done)
+         if (tid < GDN_BF16_BT) {
 -            if (tid < nval) {
 -                s.bt[tid] = bbase[(int64_t) tid * H];
 -                s.gcs[tid] = 0.0f;   // placeholder; filled by the cumsum
@@ -486,9 +500,7 @@ index 1f39c44d6..2ca266b63 100644
 -            for (int t = 0; t < GDN_BF16_BT; ++t) { acc += s.ge[t]; s.gcs[t] = acc; }
 -        }
 -        GDN_BAR();
-+        // ---- gates: the chunk-local inclusive cumsum (the kkt's, flat on padding), then ge/gv/rs/bt
-+        SWRITE();   // the state written in the previous chunk's registers (after barrier (4): W / A reads are done)
-         if (tid < GDN_BF16_BT) {
+-        if (tid < GDN_BF16_BT) {
 -            const float gcs_t = s.gcs[tid];
 +            const float gcs_t = gpf_cs;
              const bool ok = tid < nval;
@@ -499,7 +511,7 @@ index 1f39c44d6..2ca266b63 100644
              // DIRECT decay (no chunk-midpoint split, no clamp): el = e^{g_last - g_t} and
              // rs = scale*e^{g_t - g_last} are provably <= 1 for every t (gates are negative,
              // padding keeps the cumsum flat), so they can never overflow or attenuate -- the
-@@ -572,10 +604,8 @@ gdn_bf16_scan_cuda(
+@@ -572,10 +609,8 @@ gdn_bf16_scan_cuda(
              // 80-clamp) is exact for real-model spans (<= 200) but attenuates the state path
              // catastrophically for the test harness's pathological gates (spans ~ 640+): the
              // last token's own e^{g_last-g_t} ~ 1 weight becomes e^{80-(c-g_t)} ~ e^-240.
@@ -511,7 +523,7 @@ index 1f39c44d6..2ca266b63 100644
  
          // consume the previous iteration's prefetch: stage K/V to LDS (bf16)
          {
-@@ -585,9 +615,8 @@ gdn_bf16_scan_cuda(
+@@ -585,9 +620,8 @@ gdn_bf16_scan_cuda(
                  GDN_BF16_PFSTORE(&s.D[vr0 + GDN_BF16_VRU * u][vc], vb[u]);
          }
          GDN_BAR();                                                   // (1)
@@ -522,7 +534,7 @@ index 1f39c44d6..2ca266b63 100644
  
          // ---- U = K@S, O^T = S@Q^T and P^T = K@Q^T share the q and k fragments --------------
          gdn_v8f O[GDN_BF16_NTV], u[GDN_BF16_NTV], p[GDN_BF16_NTV];
-@@ -602,7 +631,7 @@ gdn_bf16_scan_cuda(
+@@ -602,7 +636,7 @@ gdn_bf16_scan_cuda(
              GDN_LDSOPAQUE(okm);
  #pragma unroll
              for (int i = 0; i < GDN_BF16_NTV; ++i) {
@@ -531,7 +543,7 @@ index 1f39c44d6..2ca266b63 100644
                  okn[i] = GDN_ROWO(s.k, GDN_BF16_KP, (ntb + i) * 16);
                  GDN_LDSOPAQUE(oSn[i]); GDN_LDSOPAQUE(okn[i]);
              }
-@@ -610,7 +639,7 @@ gdn_bf16_scan_cuda(
+@@ -610,7 +644,7 @@ gdn_bf16_scan_cuda(
  #define pkmf(ko)    gdn_fragO(sb, okm + (ko) * 2u)
  #define pknf(i, ko) gdn_fragO(sb, okn[i] + (ko) * 2u)
              const unsigned qo = gdn_rowGo((unsigned) qrs, mt * 16, lim, lane);
@@ -540,7 +552,7 @@ index 1f39c44d6..2ca266b63 100644
  #pragma unroll
              for (int sk = 0; sk < GDN_BF16_KD / 16; ++sk) {
                  const int ko = sk * 16;
-@@ -637,7 +666,7 @@ gdn_bf16_scan_cuda(
+@@ -637,7 +671,7 @@ gdn_bf16_scan_cuda(
  #undef pqf
          }
          {
@@ -549,7 +561,7 @@ index 1f39c44d6..2ca266b63 100644
  #pragma unroll
              for (int i = 0; i < GDN_BF16_NTV; ++i)
  #pragma unroll
-@@ -645,6 +674,12 @@ gdn_bf16_scan_cuda(
+@@ -645,6 +679,12 @@ gdn_bf16_scan_cuda(
  
          }
  
@@ -562,7 +574,7 @@ index 1f39c44d6..2ca266b63 100644
          float mxU = 0.0f;
          // ---- W = beta * (V - ge*U)  (beta folded here: (A*beta_col)@W == A@(beta_row*W)) ----
          {
-@@ -657,14 +692,14 @@ gdn_bf16_scan_cuda(
+@@ -657,14 +697,14 @@ gdn_bf16_scan_cuda(
  #pragma unroll
              for (int e = 0; e < 8; ++e) {           // beta / ge read once for both tiles
                  const int tok = mt * 16 + 8 * hi + e;
@@ -579,7 +591,7 @@ index 1f39c44d6..2ca266b63 100644
                  *(uint2 *) wp       = gdn_f2bf4(wa[i][0], wa[i][1], wa[i][2], wa[i][3]);
                  *(uint2 *) (wp + 4) = gdn_f2bf4(wa[i][4], wa[i][5], wa[i][6], wa[i][7]);
              }
-@@ -675,7 +710,7 @@ gdn_bf16_scan_cuda(
+@@ -675,7 +715,7 @@ gdn_bf16_scan_cuda(
          // ---- pathological gate spans; the pair form cannot. --------------------------------
          {
              const int ii = mt * 16 + lo;            // now constant per lane
@@ -588,7 +600,7 @@ index 1f39c44d6..2ca266b63 100644
  #pragma unroll
              for (int i = 0; i < GDN_BF16_NTV; ++i) {
                  const int j0 = (ntb + i) * 16 + 8 * hi;
-@@ -683,10 +718,10 @@ gdn_bf16_scan_cuda(
+@@ -683,10 +723,10 @@ gdn_bf16_scan_cuda(
  #pragma unroll
                  for (int e = 0; e < 8; ++e) {
                      const int j = j0 + e;
@@ -602,7 +614,7 @@ index 1f39c44d6..2ca266b63 100644
              }
          }
          GDN_BAR();                                                   // (2)
-@@ -696,27 +731,25 @@ gdn_bf16_scan_cuda(
+@@ -696,27 +736,25 @@ gdn_bf16_scan_cuda(
              gdn_v8f d[GDN_BF16_NTV];
  #pragma unroll
              for (int i = 0; i < GDN_BF16_NTV; ++i) d[i] = (gdn_v8f) {};
@@ -633,7 +645,7 @@ index 1f39c44d6..2ca266b63 100644
              float gvv[8];
  #pragma unroll
              for (int e = 0; e < 8; ++e) gvv[e] = 1.0f;   // V' is stored RAW; the decay lives in
-@@ -730,14 +763,13 @@ gdn_bf16_scan_cuda(
+@@ -730,14 +768,13 @@ gdn_bf16_scan_cuda(
                                                  d[i][6] * gvv[6], d[i][7] * gvv[7]);
              }
  
@@ -649,7 +661,7 @@ index 1f39c44d6..2ca266b63 100644
              const unsigned short * pdn[GDN_BF16_NTV];
  #pragma unroll
              for (int i = 0; i < GDN_BF16_NTV; ++i)
-@@ -806,10 +838,10 @@ gdn_bf16_scan_cuda(
+@@ -806,10 +843,10 @@ gdn_bf16_scan_cuda(
                          ab.f = ak;
  #pragma unroll
                          for (int e = 0; e < 4; ++e)
@@ -662,7 +674,7 @@ index 1f39c44d6..2ca266b63 100644
                          ak = au.f;
                      }
  #pragma unroll
-@@ -825,9 +857,6 @@ gdn_bf16_scan_cuda(
+@@ -825,9 +862,6 @@ gdn_bf16_scan_cuda(
              }
  #undef pvnf
          }
@@ -672,7 +684,7 @@ index 1f39c44d6..2ca266b63 100644
          GDN_BAR();                                                   // (4)
  
      }
-@@ -852,16 +881,17 @@ gdn_bf16_scan_cuda(
+@@ -852,16 +886,17 @@ gdn_bf16_scan_cuda(
  // No-op stub definitions: the gfx12 wmma intrinsic does not exist on older targets (issue #1).
  // The runtime-cc dispatch never launches these on non-RDNA4 hardware; they exist only so the
  // host-pass launch stubs in the launchers below link on every arch.
@@ -695,7 +707,7 @@ index 1f39c44d6..2ca266b63 100644
          int64_t n_seqs, int64_t sq1, int64_t sq2, int64_t sq3, int64_t sv1, int64_t sv2, int64_t sv3,
          uint3 neqk1_magic, uint3 rq3_magic, float scale, int64_t state_seq_stride, int dbg) {}
  
-@@ -870,23 +900,24 @@ __global__ static void gdn_bf16_scan_cuda(
+@@ -870,23 +905,24 @@ __global__ static void gdn_bf16_scan_cuda(
  
  // ---------------------------------------------------------------------------------------------
  
@@ -726,7 +738,7 @@ index 1f39c44d6..2ca266b63 100644
          int64_t H, int64_t H_k, int64_t n_tokens, int64_t n_seqs,
          int64_t sq1, int64_t sq2, int64_t sq3,
          int64_t sv1, int64_t sv2, int64_t sv3,
-@@ -897,13 +928,14 @@ static bool launch_gdn_bf16_scan(
+@@ -897,13 +933,14 @@ static bool launch_gdn_bf16_scan(
      const uint3 neqk1_magic = init_fastdiv_values(neqk1);
      const uint3 rq3_magic   = init_fastdiv_values(rq3);
      const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(grid, block, 0, stream);
@@ -744,7 +756,7 @@ index 1f39c44d6..2ca266b63 100644
      ggml_tensor * src_q     = dst->src[0];
      ggml_tensor * src_k     = dst->src[1];
      ggml_tensor * src_v     = dst->src[2];
-@@ -954,20 +986,26 @@ bool ggml_cuda_op_gated_delta_net_chunked_bf16(ggml_backend_cuda_context & ctx,
+@@ -954,20 +991,26 @@ bool ggml_cuda_op_gated_delta_net_chunked_bf16(ggml_backend_cuda_context & ctx,
      GGML_ASSERT(H % neqk1 == 0);
  
      const int64_t n_chunks = (n_tokens + GDN_BF16_BT - 1) / GDN_BF16_BT;
@@ -782,7 +794,7 @@ index 1f39c44d6..2ca266b63 100644
      static const bool dbg_a = getenv("GDN_DBG_A") != nullptr;
      if (dbg_a) {
          // temp debug: dump the first A matrix per (chunk, head) for the first seq
-@@ -989,7 +1027,12 @@ bool ggml_cuda_op_gated_delta_net_chunked_bf16(ggml_backend_cuda_context & ctx,
+@@ -989,7 +1032,12 @@ bool ggml_cuda_op_gated_delta_net_chunked_bf16(ggml_backend_cuda_context & ctx,
                             (long long) cc, (long long) hh, at(0, 0), at(1, 0), at(1, 1), at(63, 63));
              }
      }

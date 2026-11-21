@@ -9,13 +9,15 @@ rdna-boosts paths, and only the parts outside them gain.
 |---|---|---|
 | [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) | MIT | the engine |
 | [llama-cpp-rdna-boosts](https://github.com/stew675/llama-cpp-rdna-boosts) | MIT | the RDNA4 base these patches apply to; its decode-attention band, KQ block table and the table's reuse across layers (J1), the GLU in place (J2), grid-stall padding (J3), graphs of up to 16 tokens (J6) |
+| [radiance](https://codeberg.org/StillDeadcode/radiance) (its libr4d) | Apache-2.0 | the Gated DeltaNet chunked prefill kernels that rdna-boosts ported from libr4d, as J2 part a changes them; the tile and fragment order of J2 part b's own f16 GEMM ([NOTICE](NOTICE)) |
 
-The papers each part follows, and thanks: [STRUCTURE.md](STRUCTURE.md).  Patches only; MIT.  Written with Claude (AI).
+The papers each part follows, and thanks: [STRUCTURE.md](STRUCTURE.md).  Patches only; MIT, except the parts from radiance, which stay under
+Apache-2.0 ([NOTICE](NOTICE), [third_party/radiance](third_party/radiance)).  Written with Claude (AI).
 
 ## Structure
 
 The main pipeline has been rebuilt.  This repo's earlier patches (0001-0015) and a new GPU-resident speculative pipeline
-are merged into seven groups, numbered in the order of inference.  Each is one patch, except J2, which is two (J2 v8 is
+are merged into seven groups, numbered in the order of inference.  Each is one patch, except J2, which is two (J2 v9 is
 both files): its part b is applied last, after J7, because it needs J4-J7's server and state code.  The order: J1, J2
 part a, J3, J4, J5, J6, J7, J2 part b.
 
@@ -148,8 +150,8 @@ KLD reference above.  Every switch, its values and its default: [SWITCHES.md](SW
 ## Notice
 
 These patches are offered for research and evaluation.  Every part can be turned off with its switch
-([SWITCHES.md](SWITCHES.md)).  Code from other projects is credited under its license in the file headers and in
-[STRUCTURE.md](STRUCTURE.md), which also lists the papers each part follows.
+([SWITCHES.md](SWITCHES.md)).  Code from other projects is credited under its license in the file headers, in
+[NOTICE](NOTICE) and in [STRUCTURE.md](STRUCTURE.md), which also lists the papers each part follows.
 
 ## Thanks
 

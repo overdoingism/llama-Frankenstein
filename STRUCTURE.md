@@ -5,10 +5,10 @@ from, the lossy parts with their KLD, and the change log.  The short table is in
 Written with Claude (AI).
 
 The seven groups follow the order of inference.  Each is one patch, `J<n>-4f9-<part>-v<version>.patch`, except J2, which
-is two: `J2-4f9-prefill-a-v8.patch` and `J2-4f9-prefill-b-v8.patch` (J2 v8 is both).  They are applied in number order on
+is two: `J2-4f9-prefill-a-v9.patch` and `J2-4f9-prefill-b-v9.patch` (J2 v9 is both).  They are applied in number order on
 rdna-boosts `v17-4f9dfa0e3-r327`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
-order: J1 attention v4.2, J2 prefill-a v8, J3 decode v5.1, J4 sampling v1, J5 speculative v3, J6 step v9.1, J7 state v1.2,
-J2 prefill-b v8.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
+order: J1 attention v4.2, J2 prefill-a v9, J3 decode v5.1, J4 sampling v1, J5 speculative v3, J6 step v9.1, J7 state v1.2,
+J2 prefill-b v9.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
 a group adapted to a new base, nothing else; its next change drops the decimal.
 
 Types: `speed` = faster, the same output; `memory` = less VRAM, the same output; `speed/diff` = faster, output not
@@ -107,9 +107,10 @@ part b.  The GLU in place is rdna-boosts' since r323 (`GGML_GLU_INPLACE`).
 | draft ubatch | the draft model's ubatch capped at 512: about 0.7 GiB less VRAM with `-ub 2048` | `FRANK_DRAFT_UB` (512) | memory |
 | fused prefill | the attention output gate reads Q in place; Q / K norm, rope and the FWHT in one kernel; one-step fp8 conversion of Q8_0 / IQ4_NL weights; Gated DeltaNet: the convolution with the q / k norm, the output norm with the SiLU gate, chunked rows in bf16, the scan reading the next chunk's gate early | switches in [SWITCHES.md](SWITCHES.md) | speed |
 
-- Code: rdna-boosts (MIT): the chunked Gated DeltaNet kernel the scan is adapted from.  radiance (Apache-2.0): the own
-  f16 GEMM's tile, WMMA operand order and activation fragment order follow libr4d's `r4d_gemm_mxfp4a8_tiled`; its weight
-  decoding follows ggml's (MIT).
+- Code: rdna-boosts (MIT): the chunked Gated DeltaNet kernel the scan is adapted from; rdna-boosts ported its kernels
+  from libr4d, which radiance distributes under Apache-2.0.  radiance (Apache-2.0): the own f16 GEMM's tile, WMMA operand
+  order and activation fragment order follow libr4d's `r4d_gemm_mxfp4a8_tiled`; its weight decoding follows ggml's (MIT).
+  Both parts stay under Apache-2.0 ([NOTICE](NOTICE), `third_party/radiance/`).
 - References: X. Wu, Z. Yao, Y. He, "ZeroQuant-FP: A Leap Forward in LLMs Post-Training W4A8 Quantization Using
   Floating-Point Formats", arXiv:2307.09782, 2023, §3 (4-bit weights cast to fp8 for an fp8 GEMM with fp8 activations: K1,
   M4; with power-of-two block scales, as MXFP4 has, the cast is exact: M4).  Ashkboos et al., QuaRot (J1; the FWHT the fused Q / K kernel
@@ -237,6 +238,11 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-21: J2 v9.**  Licenses only, no change to the code: the parts of J2 that derive from radiance's libr4d
+(part a: the Gated DeltaNet chunked prefill kernels rdna-boosts ported from libr4d; part b: the own f16 GEMM's tile and
+fragment order) state radiance's Apache-2.0 license and what was changed in their file headers, and radiance's LICENSE and
+NOTICE are in `third_party/radiance/` ([NOTICE](NOTICE)).
 
 **2026-11-21: J1 v4.2, J2 v8 (two files), J3 v5.1, J6 v9.1, J7 v1.2** on rdna-boosts `v17-4f9dfa0e3-r327` (the same
 llama.cpp `4f9dfa0e3`); J4 v1 and J5 v3 move as they are.  J2's new part b is applied last, after J7.

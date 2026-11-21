@@ -112,7 +112,7 @@ index 2402c745b..903177b14 100644
  }
  
 diff --git a/ggml/src/ggml-cuda/lf-kq-blas.cu b/ggml/src/ggml-cuda/lf-kq-blas.cu
-index a1b296d51..5e27408e7 100644
+index a1b296d51..48fb3fc6e 100644
 --- a/ggml/src/ggml-cuda/lf-kq-blas.cu
 +++ b/ggml/src/ggml-cuda/lf-kq-blas.cu
 @@ -59,7 +59,33 @@ int lf_kq_mode() {
@@ -496,7 +496,7 @@ index a1b296d51..5e27408e7 100644
      CUDA_CHECK(cudaGetLastError());
  #else
      GGML_UNUSED_VARS(ctx, src0, src1, dst, kk, y, c);
-@@ -2131,120 +2110,503 @@ bool ggml_cuda_lf_kq8_fp8_take(ggml_backend_cuda_context & ctx, const ggml_tenso
+@@ -2131,120 +2110,505 @@ bool ggml_cuda_lf_kq8_fp8_take(ggml_backend_cuda_context & ctx, const ggml_tenso
  #endif // defined(FRANK_HIPBLASLT)
  }
  
@@ -596,8 +596,10 @@ index a1b296d51..5e27408e7 100644
 +// a multiple of BMF) and each wave reads its fragments from global memory; the weight is decoded slab by slab (64 values of K)
 +// into LDS by the block's threads, one unit (32 values of one row) a thread, from raw bytes loaded a slab ahead.  The grid runs
 +// the token tiles of one weight tile consecutively.  The tile, the WMMA operand order and the activation fragment order follow
-+// radiance's libr4d r4d_gemm_mxfp4a8_tiled (codeberg.org/StillDeadcode/radiance, Apache-2.0); the decoders follow ggml's
-+// dequantize_row_q{4,5,6}_K / iq4_xs arithmetic (the values of lf_kq_dec_* / to_fp16).
++// radiance's libr4d r4d_gemm_mxfp4a8_tiled (codeberg.org/StillDeadcode/radiance, libr4d/; Apache License 2.0, copyright Deadcode
++// and the radiance contributors, see its LICENSE and NOTICE).  Changed from it: f16 operands with f32 accumulation instead of
++// fp8 x MXFP4, the weight decoded from K-quant blocks slab by slab into LDS, the block height and weight tile chosen by batch
++// size.  The decoders follow ggml's dequantize_row_q{4,5,6}_K / iq4_xs arithmetic (the values of lf_kq_dec_* / to_fp16).
 +
 +typedef unsigned lf_o16_u2 __attribute__((ext_vector_type(2)));
 +typedef unsigned lf_o16_u4 __attribute__((ext_vector_type(4)));
@@ -1088,7 +1090,7 @@ index a1b296d51..5e27408e7 100644
      if (lf_kq_mode() == 2) {
          if (K % 4 != 0) return false;
          if (!ggml_cuda_lf_kq_fp8_ready(src0, ctx.device, (int) M, (int) T, (int) K)) {
-@@ -2253,6 +2615,13 @@ bool ggml_cuda_lf_kq_blas_supported(ggml_backend_cuda_context & ctx, const ggml_
+@@ -2253,6 +2617,13 @@ bool ggml_cuda_lf_kq_blas_supported(ggml_backend_cuda_context & ctx, const ggml_
          }
          return true;
      }
@@ -1102,7 +1104,7 @@ index a1b296d51..5e27408e7 100644
      if (!lf_kq_ready(ctx.device, ctx.stream(), lf_kq_chunk_rows((int) M, (int) K), (int) T, (int) K, (int) M)) {
          // first use probes / allocates / tunes: not while a graph is being captured
          hipStreamCaptureStatus st = hipStreamCaptureStatusNone;
-@@ -2296,12 +2665,16 @@ bool ggml_cuda_lf_kq8_mul_mat_add(ggml_backend_cuda_context & ctx, ggml_tensor *
+@@ -2296,12 +2667,16 @@ bool ggml_cuda_lf_kq8_mul_mat_add(ggml_backend_cuda_context & ctx, ggml_tensor *
      const char * c = (const char *) other->data, * d = (const char *) add->data;
      const size_t n = ggml_nbytes(add);
      if (c != d && c < d + n && d < c + n) return false;
@@ -1120,7 +1122,7 @@ index a1b296d51..5e27408e7 100644
          lf_kq_f16_mul_mat(ctx, src0, src1, mm, (float *) add->data, (const float *) other->data);
          return true;
      }
-@@ -2315,6 +2688,10 @@ bool ggml_cuda_lf_kq8_mul_mat_add(ggml_backend_cuda_context & ctx, ggml_tensor *
+@@ -2315,6 +2690,10 @@ bool ggml_cuda_lf_kq8_mul_mat_add(ggml_backend_cuda_context & ctx, ggml_tensor *
  
  void ggml_cuda_lf_kq_blas_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
  #if defined(FRANK_HIPBLASLT)
@@ -1131,7 +1133,7 @@ index a1b296d51..5e27408e7 100644
      if (lf_kq_mode() == 2) {
          ggml_cuda_lf_kq_fp8_mul_mat(ctx, src0, src1, dst, (float *) dst->data, nullptr);
          return;
-@@ -2332,6 +2709,10 @@ static void lf_kq_f16_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+@@ -2332,6 +2711,10 @@ static void lf_kq_f16_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
          float * y, const float * c) {
  #if defined(FRANK_HIPBLASLT)
      GGML_UNUSED(dst);
@@ -1142,7 +1144,7 @@ index a1b296d51..5e27408e7 100644
      cudaStream_t stream = ctx.stream();
      const int K  = (int) src0->ne[0], M = (int) src0->ne[1];
      const int T  = (int) (src1->ne[1] * src1->ne[2] * src1->ne[3]);
-@@ -2365,11 +2746,11 @@ static void lf_kq_f16_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+@@ -2365,11 +2748,11 @@ static void lf_kq_f16_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
      const ggml_tensor * x_src = src1;
      while (x_src->view_src != nullptr) x_src = x_src->view_src;
      const uint64_t gen = g_lf_kq_graph_gen.load(std::memory_order_relaxed);
@@ -1156,7 +1158,7 @@ index a1b296d51..5e27408e7 100644
      }
      lf_kq_alpha<<<(M + 255) / 256, 256, 0, stream>>>(sx, av, M);
  
-@@ -2622,6 +3003,22 @@ const char * ggml_cuda_lf_kq_blas_algos_string() {
+@@ -2622,6 +3005,22 @@ const char * ggml_cuda_lf_kq_blas_algos_string() {
  #endif // defined(FRANK_HIPBLASLT)
  }
  
