@@ -6,7 +6,7 @@ Written with Claude (AI).
 
 The seven groups follow the order of inference.  Each is one patch, `J<n>-919-<part>-v<version>.patch`, except J2, which
 is two: `J2-919-prefill-a-v10.1.patch` and `J2-919-prefill-b-v10.1.patch` (J2 v10.1 is both).  They are applied in number order on
-rdna-boosts `v17-919794500-r329`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
+rdna-boosts `v17-919794500-r331`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
 order: J1 attention v4.3, J2 prefill-a v10.1, J3 decode v5.2, J4 sampling v1, J5 speculative v3.1, J6 step v9.2, J7 state v1.3,
 J2 prefill-b v10.1.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
 a group adapted to a new base, nothing else; its next change drops the decimal.
@@ -237,6 +237,12 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-22: pinned at rdna-boosts `v17-919794500-r331`.**  No patch changes.  r331 restores block 00's allocator
+rules, which rdna-boosts' r328 re-base had dropped: a GLU may take its gate's memory (`GGML_GLU_INPLACE`), view sources
+nothing reads are released, and a graph with another layout is not given the previous one's addresses.  It also makes
+two block-10 fixes that do nothing on HIP.  Against r329: 0.19 GiB less VRAM, the same tokens and draft acceptance,
+prefill and decode within 0.5 % ([README](README.md#performance)).
 
 **2026-11-22: J1 v4.3, J2 v10.1 (both files), J3 v5.2, J5 v3.1, J6 v9.2, J7 v1.3** on rdna-boosts `v17-919794500-r329`
 (rdna-boosts' blocks moved to llama.cpp master `919794500`); J4 v1 moves as it is.  Only what the new base needed:

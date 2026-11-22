@@ -68,8 +68,10 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
 - r329 (2026-11-22): the same groups on rdna-boosts `v17-919794500-r329`, its blocks moved to llama.cpp master
   `919794500`.  Against r327: the same tokens (22 server requests on UD-Q4_K_XL with 2 slots; 400 tokens after a 48K
   prefix, zh / en, with the same top-10 log-probs), the same time per step and the same draft acceptance; the 32K prompt:
-  2784 / 62.8 (r327: 2784 / 62.6).  The new base reserves 0.19 GiB more VRAM at load for the prefill compute buffer,
-  plain r329 as much as this set.
+  2784 / 62.8 (r327: 2784 / 62.6).  On r329 the prefill compute buffer was 0.19 GiB larger, plain r329 as much as this
+  set: rdna-boosts' re-base had dropped its allocator rules (the GLU in place among them), and its r331 restores them.
+  Pinned at r331 since: against r329, 0.19 GiB less VRAM, the same tokens and draft acceptance, prefill and decode
+  within 0.5 %.
 
 ### History
 
@@ -92,7 +94,7 @@ here.
 | what | pinned at |
 |---|---|
 | llama.cpp | commit `919794500475862f6768c353255469dc661cb734` (master, build `b12597`) |
-| llama-cpp-rdna-boosts | release `v17-919794500-r329`, commit `d5bb66e66adbf9eba05eb58115436546e2733d8d`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v17-919794500-r329` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
+| llama-cpp-rdna-boosts | release `v17-919794500-r331`, commit `5d442e27e3a20243ca34dc99c7d8a50d6035bd15`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v17-919794500-r331` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
 | this repository | the eight patch files in [`patches/`](patches), all of them, in the order J1, J2 part a, J3 to J7, J2 part b |
 | ROCm | 10.0.0 with hipBLASLt, the HIP code compiled for gfx1201 |
 
