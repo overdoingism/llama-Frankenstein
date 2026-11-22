@@ -122,7 +122,12 @@ part b.  The GLU in place is rdna-boosts' since r323 (`GGML_GLU_INPLACE`).
   M. Zhang, X. Wu, C. Li, Y. He, "ZeroQuant: Efficient and Affordable Post-Training Quantization for Large-Scale
   Transformers", NeurIPS 2022, arXiv:2206.01861, §4.3 and Appendix D, and Y. Lin, H. Tang, S. Yang, Z. Zhang, G. Xiao,
   C. Gan, S. Han, "QServe: W4A8KV4 Quantization and System Co-design for Efficient LLM Serving", MLSys 2025,
-  arXiv:2405.04532, §5.1 (the activation quantization fused into the kernel that produces the activation).  The prefill / decode split:
+  arXiv:2405.04532, §5.1 (the activation quantization fused into the kernel that produces the activation).  K1's channel
+  amax folded into the kernel that writes the activation (an RMS norm with its weight, a GLU, a gated unary with its
+  multiply), the batch scale then taken from the largest channel amax: H. Xi, H. Cai, L. Zhu, Y. Lu, K. Keutzer, J. Chen,
+  S. Han, "COAT: Compressing Optimizer states and Activation for Memory-Efficient FP8 Training", ICLR 2025,
+  arXiv:2410.19313, Group Scaling (a per-tensor max reduction in two stages, the per-group stage fused into the previous
+  operation); ZeroQuant (above) computes the scale from the values still in the producing kernel's registers.  The prefill / decode split:
   A. Panferov et al., "Disaggregated Quantization: Specializing LLM Prefill and Decode", arXiv:2609.26333, 2026 (prefill on
   compute-native low-precision weights, decode on compact weight-only ones).  The residual ADD: J. J. Dongarra, J. Du Croz,
   S. Hammarling, I. S. Duff, "A Set of Level 3 Basic Linear Algebra Subprograms", ACM TOMS 16(1), 1990 (the GEMM's βC term),
@@ -237,6 +242,9 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-22: docs.**  J2's references add COAT (Xi et al., ICLR 2025) for K1's channel amax folded into the kernel
+that writes the activation, with ZeroQuant's register-side scale.  No patch changes.
 
 **2026-11-22: pinned at rdna-boosts `v17-919794500-r331`.**  No patch changes.  r331 restores block 00's allocator
 rules, which rdna-boosts' r328 re-base had dropped: a GLU may take its gate's memory (`GGML_GLU_INPLACE`), view sources
