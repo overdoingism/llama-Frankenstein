@@ -9,7 +9,7 @@ on:
     inputs:
       rdna_boosts:
         description: "llama-cpp-rdna-boosts release tag the patches are applied on"
-        default: "v17-4f9dfa0e3-r327"
+        default: "v17-919794500-r329"
   push:
     branches: [ci-windows]
 
@@ -19,7 +19,7 @@ permissions:
   attestations: write
 
 env:
-  RB_TAG: ${{ inputs.rdna_boosts || 'v17-4f9dfa0e3-r327' }}
+  RB_TAG: ${{ inputs.rdna_boosts || 'v17-919794500-r329' }}
   ROCM_URL: https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx120X-all-10.0.0.tar.gz
   ROCM_SHA256: 75da73c483cbc0456d9008f2079b333f4f9d3b7744705378ff8007e502ca38c5
 
@@ -49,9 +49,9 @@ jobs:
           git -C llama.cpp checkout --quiet "$BASE"
           cd llama.cpp
           bash ../rdna-boosts/scripts/apply-all.sh .
-          # J2 v10 is two files: part b goes last, after J7 (it needs J4-J7's server and state code)
-          for f in J1-4f9-attention-v4.2 J2-4f9-prefill-a-v10 J3-4f9-decode-v5.1 J4-4f9-sampling-v1 \
-                   J5-4f9-speculative-v3 J6-4f9-step-v9.1 J7-4f9-state-v1.2 J2-4f9-prefill-b-v10; do
+          # J2 v10.1 is two files: part b goes last, after J7 (it needs J4-J7's server and state code)
+          for f in J1-919-attention-v4.3 J2-919-prefill-a-v10.1 J3-919-decode-v5.2 J4-919-sampling-v1 \
+                   J5-919-speculative-v3.1 J6-919-step-v9.2 J7-919-state-v1.3 J2-919-prefill-b-v10.1; do
             echo "applying $f.patch"
             git apply "../overdoing/patches/$f.patch"
           done

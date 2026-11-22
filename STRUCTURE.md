@@ -4,11 +4,11 @@ What each group in [`patches/`](patches) contains, its switches (default in brac
 from, the lossy parts with their KLD, and the change log.  The short table is in the [README](README.md#structure).
 Written with Claude (AI).
 
-The seven groups follow the order of inference.  Each is one patch, `J<n>-4f9-<part>-v<version>.patch`, except J2, which
-is two: `J2-4f9-prefill-a-v10.patch` and `J2-4f9-prefill-b-v10.patch` (J2 v10 is both).  They are applied in number order on
-rdna-boosts `v17-4f9dfa0e3-r327`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
-order: J1 attention v4.2, J2 prefill-a v10, J3 decode v5.1, J4 sampling v1, J5 speculative v3, J6 step v9.1, J7 state v1.2,
-J2 prefill-b v10.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
+The seven groups follow the order of inference.  Each is one patch, `J<n>-919-<part>-v<version>.patch`, except J2, which
+is two: `J2-919-prefill-a-v10.1.patch` and `J2-919-prefill-b-v10.1.patch` (J2 v10.1 is both).  They are applied in number order on
+rdna-boosts `v17-919794500-r329`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
+order: J1 attention v4.3, J2 prefill-a v10.1, J3 decode v5.2, J4 sampling v1, J5 speculative v3.1, J6 step v9.2, J7 state v1.3,
+J2 prefill-b v10.1.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
 a group adapted to a new base, nothing else; its next change drops the decimal.
 
 Types: `speed` = faster, the same output; `memory` = less VRAM, the same output; `speed/diff` = faster, output not
@@ -237,6 +237,19 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-22: J1 v4.3, J2 v10.1 (both files), J3 v5.2, J5 v3.1, J6 v9.2, J7 v1.3** on rdna-boosts `v17-919794500-r329`
+(rdna-boosts' blocks moved to llama.cpp master `919794500`); J4 v1 moves as it is.  Only what the new base needed:
+- J1: `q8_0r` rows written by `SET_ROWS` also from a BF16 source (llama.cpp's new source type); warp shuffles through
+  ggml's `ggml_cuda_shfl*` helpers, since llama.cpp's HIP build now uses the real `_sync` builtins with their 64-bit mask.
+  The same in J2 part a (the own Gated DeltaNet kernel) and J6 (the loop's kernels).
+- J3: upstream's op count; mmvk's early return at the new place of upstream's fused-matvec check; the DFlash2 draft's
+  conv in `dflash2.cpp`, where llama.cpp now builds DFlash2 apart from its other DFlash variants.
+- J5: the adaptive width and its state live in llama.cpp's new DFlash2 class.  J6: the loop looks for the DFlash2 type.
+- J7: the prompt cache's pinned pool follows the prompt cache into `server-slot-sched`.
+- J2 part b: the same changed lines as v10.
+Against r327: the same tokens and log-probs, the same time per step and draft acceptance
+([README](README.md#performance)).
 
 **2026-11-22: docs.**  The J7 table no longer says that a cleared slot's checkpoints move into the prompt cache instead
 of being copied: llama.cpp has shared them with the prompt cache since its reference-counted checkpoints, and J7 has

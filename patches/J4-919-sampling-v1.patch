@@ -1,5 +1,5 @@
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index da77044b7..58fddf90c 100644
+index 9e0050591..475a499ca 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
 @@ -320,8 +320,60 @@ struct common_sampler {
@@ -63,7 +63,7 @@ index da77044b7..58fddf90c 100644
  // S2: the fast path's k when every sampler ahead of top-k is a no-op for these parameters (logit bias is handled by the
  // fast path itself), else 0.  GGML_LF_FAST_TOPK=0 turns it off.
  static int common_sampler_fast_topk_k(const common_params_sampling & p) {
-@@ -640,6 +692,39 @@ struct common_sampler * common_sampler_init(
+@@ -648,6 +700,39 @@ struct common_sampler * common_sampler_init(
          }
      }
  
@@ -103,7 +103,7 @@ index da77044b7..58fddf90c 100644
      return result;
  }
  
-@@ -702,6 +787,10 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
+@@ -710,6 +795,10 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
      llama_sampler_accept(gsmpl->chain, token);
  
      gsmpl->prev.push_back(token);
@@ -114,7 +114,7 @@ index da77044b7..58fddf90c 100644
  }
  
  void common_sampler_reset(struct common_sampler * gsmpl) {
-@@ -726,6 +815,13 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
+@@ -734,6 +823,13 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
          /* .fast_k  */ gsmpl->fast_k,
          /* .fast_bias */ gsmpl->fast_bias,
          /* .fast_bias_ids */ gsmpl->fast_bias_ids,
@@ -128,7 +128,7 @@ index da77044b7..58fddf90c 100644
      };
  }
  
-@@ -748,6 +844,12 @@ void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
+@@ -756,6 +852,12 @@ void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
      dst->cur_p.data = src->cur_p.data ? dst->cur.data() : nullptr; // re-point to dst's buffer
      dst->rng        = src->rng;
      dst->t_total_us = src->t_total_us;
@@ -141,7 +141,7 @@ index da77044b7..58fddf90c 100644
  }
  
  void common_perf_print(const struct llama_context * ctx, const struct common_sampler * gsmpl) {
-@@ -804,7 +906,7 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
+@@ -812,7 +914,7 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
      return gsmpl->chain;
  }
  
@@ -150,7 +150,7 @@ index da77044b7..58fddf90c 100644
      llama_synchronize(ctx);
  
      // start measuring sampling time after the llama_context synchronization in order to not measure any ongoing async operations
-@@ -893,6 +995,10 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
+@@ -901,6 +1003,10 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
      return id;
  }
  
@@ -161,7 +161,7 @@ index da77044b7..58fddf90c 100644
  std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {
      GGML_ASSERT(idxs.size() == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
  
-@@ -999,8 +1105,12 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
+@@ -1007,8 +1113,12 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
          }
  
          if (q_x > 0.0f && (p_x >= q_x || uni(gsmpl->rng) < p_x / q_x)) {
@@ -176,7 +176,7 @@ index da77044b7..58fddf90c 100644
              continue;
          }
  
-@@ -1028,6 +1138,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
+@@ -1036,6 +1146,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
              }
          }
  

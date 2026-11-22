@@ -1,8 +1,8 @@
 diff --git a/common/common.h b/common/common.h
-index 64f51cbd4..56de54753 100644
+index ef24cecca..0b2972881 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -921,7 +921,7 @@ struct common_params {
+@@ -927,7 +927,7 @@ struct common_params {
  // call once at the start of a program if it uses libcommon
  // initializes the logging system and prints info about the build
  void common_init();
@@ -64,10 +64,10 @@ index bd26f8d93..ea8cac5b8 100644
      if (getenv("FRANK_FA_KQ_BLOCKS_REUSE") != nullptr) {
          LOG_WRN("FRANK_FA_KQ_BLOCKS_REUSE is set, but it is no longer read: the release's GGML_CUDA_FA_KQ_BLOCKS_REUSE "
 diff --git a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
-index bdf823c8b..3b64c0128 100644
+index 3ebb75a23..27b178f20 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
-@@ -2245,11 +2245,6 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
+@@ -2293,11 +2293,6 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
      if (cuda_ctx->gdn_norm_pending != nullptr && i < cuda_ctx->gdn_norm_gate_at) {
          return 0;
      }
@@ -80,10 +80,10 @@ index bdf823c8b..3b64c0128 100644
      if (cgraph->nodes[i]->op == GGML_OP_MUL_MAT && ggml_can_fuse(cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_ADD }) &&
              ggml_cuda_lf_kq8_mul_mat_add(*cuda_ctx, cgraph->nodes[i], cgraph->nodes[i + 1])) {
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 2402c745b..903177b14 100644
+index 7bbb2adce..bc1931611 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -7322,7 +7322,7 @@ bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
+@@ -7407,7 +7407,7 @@ bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
      }
  
      // K1: the hipBLASLt prefill GEMM (FRANK_KQ_BLAS) takes these matmuls unfused
@@ -92,7 +92,7 @@ index 2402c745b..903177b14 100644
          return false;
      }
  
-@@ -12621,6 +12621,18 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -12747,6 +12747,18 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_lf_kq_blas_fp8_shapes") == 0) {
          return (void *)ggml_cuda_lf_kq_blas_fp8_shapes;
      }
@@ -1258,7 +1258,7 @@ index a01b182e6..d23c2c7d4 100644
 -int ggml_cuda_lf_kq8_glu16_window(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i);
 -int ggml_cuda_lf_kq8_glu16_take(ggml_backend_cuda_context & ctx, const ggml_tensor * t);
 diff --git a/ggml/src/ggml-cuda/mmq.cu b/ggml/src/ggml-cuda/mmq.cu
-index 87cbab16e..283dc32a3 100644
+index 86b7906e2..8dda0cf81 100644
 --- a/ggml/src/ggml-cuda/mmq.cu
 +++ b/ggml/src/ggml-cuda/mmq.cu
 @@ -989,7 +989,7 @@ int ggml_cuda_mul_mat_q_pair_try_fuse(ggml_backend_cuda_context & ctx, const ggm
@@ -1665,10 +1665,10 @@ index d552cc8c1..ad3e76640 100644
              if (unsigned int * cbits = ggml_cuda_lf_kq8_amax_take(ctx, mul_node, &kc)) {
                  unary_gated_chan_amax_cuda<op>((const float *) unary_src->data, (const float *) other_src->data, (float *) mul_node->data,
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index a274c01ee..522c271d1 100644
+index c39665bb0..139685083 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -19,6 +19,9 @@
+@@ -20,6 +20,9 @@
  #include "log.h"
  #include "sampling.h"
  #include "speculative.h"
@@ -1678,7 +1678,7 @@ index a274c01ee..522c271d1 100644
  #include "step-audit.h"
  #include "../../src/llama-ext.h"   // llama_model_dflash_selector_top_k (BigOne audit)
  
-@@ -32,6 +35,7 @@ static common_step_audit * server_step_audit(llama_context * ctx_tgt) {
+@@ -33,6 +36,7 @@ static common_step_audit * server_step_audit(llama_context * ctx_tgt) {
  #include "base64.hpp"
  
  #include <algorithm>
@@ -1686,7 +1686,7 @@ index a274c01ee..522c271d1 100644
  #include <cmath>
  #include <cstddef>
  #include <cinttypes>
-@@ -317,6 +321,8 @@ struct server_slot {
+@@ -325,6 +329,8 @@ struct server_slot {
  
      // n_tokens of the context checkpoint this task restored, while nothing has been decoded since (-1: none)
      int64_t n_tokens_ckpt_restored = -1;
@@ -1695,7 +1695,7 @@ index a274c01ee..522c271d1 100644
      bool spec_is_replay = false;
      int32_t spec_n_emit_last = 0;   // BigOne stage 5: tokens the slot's last verify emitted (the two-sequence loop starts after it)
      std::mt19937 spec_synth_rng;
-@@ -452,6 +458,7 @@ struct server_slot {
+@@ -464,6 +470,7 @@ struct server_slot {
          spec_is_replay = false;
  
          n_tokens_ckpt_restored = -1;
@@ -1703,7 +1703,7 @@ index a274c01ee..522c271d1 100644
  
          last_nl_pos    = 0;
          generated      = {};
-@@ -1295,6 +1302,152 @@ private:
+@@ -1314,6 +1321,152 @@ private:
          return e == nullptr || atoi(e) != 0;
      }();
  
@@ -1856,7 +1856,7 @@ index a274c01ee..522c271d1 100644
      std::vector<common_state_data> ckpt_spare;
  
      // LLAMA_SERVER_SPEC_CKPT_DEVICE: where the target's speculative checkpoint is kept -- the one saved before a verify
-@@ -1850,6 +2003,52 @@ private:
+@@ -1878,6 +2031,52 @@ private:
              }
          }
  
@@ -1909,7 +1909,7 @@ index a274c01ee..522c271d1 100644
          slots.clear();
  
          ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
-@@ -5051,6 +5250,7 @@ private:
+@@ -5013,6 +5212,7 @@ private:
  
          // start populating the batch for this iteration
          batch.clear();
@@ -1917,7 +1917,7 @@ index a274c01ee..522c271d1 100644
  
          // track if given slot can be batched with slots already in the batch
          auto & slot_batched = batch.slot_batched;
-@@ -5686,6 +5886,7 @@ private:
+@@ -5618,6 +5818,7 @@ private:
  
                          slot.stats.n_prompt_cached    = n_past;
                          slot.stats.n_prompt_processed = 0;
@@ -1925,7 +1925,7 @@ index a274c01ee..522c271d1 100644
  
                          metrics.add_prompt_cached(n_past);
  
-@@ -5901,6 +6102,37 @@ private:
+@@ -5836,6 +6037,37 @@ private:
                                  break;
                              }
                          }
@@ -1963,7 +1963,7 @@ index a274c01ee..522c271d1 100644
                      }
  
                      // the number of tokens added to the batch for the current slot
-@@ -5911,6 +6143,11 @@ private:
+@@ -5846,6 +6078,11 @@ private:
  
                      const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
  
@@ -1975,7 +1975,7 @@ index a274c01ee..522c271d1 100644
                      bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
                      if (ckpt_align) {
                          // the batch that holds the position 4 + n_ubatch before the end, and the last 4 tokens
-@@ -5945,6 +6182,10 @@ private:
+@@ -5885,6 +6122,10 @@ private:
                          if (!is_user_start && !near_prompt_end) {
                              do_checkpoint = false;
                          }
@@ -1986,7 +1986,7 @@ index a274c01ee..522c271d1 100644
                      }
  
                      const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
-@@ -6096,12 +6337,19 @@ private:
+@@ -6039,12 +6280,19 @@ private:
          }
  
          int ret = 0;

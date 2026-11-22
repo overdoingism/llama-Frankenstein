@@ -15,8 +15,8 @@ applied by its own script, then this repository's eight patch files.  `llama-ser
 
 | what | version |
 |---|---|
-| llama.cpp | commit `4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad` (10 commits after the `v1.0.0` tag; also in rdna-boosts' `release.json`, field `base`) |
-| llama-cpp-rdna-boosts | release tag `v17-4f9dfa0e3-r327` = commit `8f349d0e71b236e081e28efa9eb9dca7f5ace945`.  If the tag or the repository is gone: the tag `pin/v17-4f9dfa0e3-r327` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), the same commit |
+| llama.cpp | commit `919794500475862f6768c353255469dc661cb734` (master, the build tag `b12597`, 238 commits after `v1.0.0`; also in rdna-boosts' `release.json`, field `base`) |
+| llama-cpp-rdna-boosts | release tag `v17-919794500-r329` = commit `d5bb66e66adbf9eba05eb58115436546e2733d8d`.  If the tag or the repository is gone: the tag `pin/v17-919794500-r329` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), the same commit |
 | this repository | all eight files in `patches/`, in this order: `J1-*`, `J2-*-prefill-a-*`, `J3-*`, `J4-*`, `J5-*`, `J6-*`, `J7-*`, `J2-*-prefill-b-*` (J2 v10 is the two J2 files; part b needs J4-J7's server and state code, so it goes last) |
 | ROCm | 10.0.0 with hipBLASLt.  Linux: AMD's TheRock Python packages `rocm[libraries,devel,device-gfx1201]==10.0.0`, whose `_rocm_sdk_devel` folder is the ROCm root.  Windows: TheRock's `therock-dist-windows-gfx120X-all-10.0.0` (URL and SHA-256 in the [CI workflow](.github/workflows/windows-gfx1201.yml)).  HIP compiler: that release's clang (`AMD clang version 23.0.0git`, llvm-project `8f497e0992fb`) |
 | compilers, build tools | Linux: GCC 13.3 for C / C++, CMake 3.28, make.  Windows: the SDK's clang for C, C++ and HIP, Visual Studio 2022 (not 2026) for the libraries and tools, CMake 4.3, Ninja, Git for Windows |
@@ -56,10 +56,10 @@ applied by its own script, then this repository's eight patch files.  `llama-ser
 
 | after | command | tree |
 |---|---|---|
-| the llama.cpp checkout | `git rev-parse HEAD^{tree}` | `cfb1f99a2793d89250533834737764cebff10be7` (`release.json` field `base_tree`) |
-| `apply-all.sh` | `git rev-parse HEAD^{tree}` | `4792f98b82a4c6433bf11c629fdf01c21a143ce9` (`release.json` field `tree`); the branch tip is commit `e159adfc2e6a15479ad6bb345a564e4aa132b581` (field `tip`) |
-| J1 to J7 (J2 part a only) | `git add -A`, then `git write-tree` | `990f0f3970158885cfdf48ecda4f4ad387342fcb` |
-| all eight files (J2 part b last) | `git add -A`, then `git write-tree` | `c6a96eec9e28b1ea64bd5efd86dd3912dbe41433` |
+| the llama.cpp checkout | `git rev-parse HEAD^{tree}` | `916941663346eb86004bed77f74e90fcf9c43126` (`release.json` field `base_tree`) |
+| `apply-all.sh` | `git rev-parse HEAD^{tree}` | `63195b0ceb8dd9dea206a6a92b9bcd4a52e494e6` (`release.json` field `tree`); the branch tip is commit `bbd08a3004dc482c151a5f060ec2d53bcc030ebc` (field `tip`) |
+| J1 to J7 (J2 part a only) | `git add -A`, then `git write-tree` | `127799f35e73c0dfaa13d0f72d959cd2938232ff` |
+| all eight files (J2 part b last) | `git add -A`, then `git write-tree` | `8a78791ac57d765c98aa6deefec01cba55b2a0c1` |
 
 `git apply` leaves the new files untracked, so the last two checks stage everything first (that changes no file).  A build
 folder named `build*` at the top is ignored by llama.cpp's `.gitignore`; check before configuring if it lives elsewhere
@@ -87,8 +87,8 @@ them.
 
 All systems:
 
-- `v17-4f9dfa0e3-r327` is an annotated tag: `git rev-parse v17-4f9dfa0e3-r327` prints the tag object (`695555c5...`), not
-  the commit.  Compare `git rev-parse v17-4f9dfa0e3-r327^{commit}` with the commit above.  The `pin/` tag in the fork
+- `v17-919794500-r329` is an annotated tag: `git rev-parse v17-919794500-r329` prints the tag object (`101611a7...`), not
+  the commit.  Compare `git rev-parse v17-919794500-r329^{commit}` with the commit above.  The `pin/` tag in the fork
   points at the commit itself.
 - `apply-all.sh` needs a clean llama.cpp tree and no existing `rdna-boosts` branch (it sets the committer identity
   itself).  Without `jq` it skips its tree check without saying so: check the tree yourself.  If it reports that it fell
