@@ -5,10 +5,10 @@ from, the lossy parts with their KLD, and the change log.  The short table is in
 Written with Claude (AI).
 
 The seven groups follow the order of inference.  Each is one patch, `J<n>-919-<part>-v<version>.patch`, except J2, which
-is two: `J2-919-prefill-a-v10.1.patch` and `J2-919-prefill-b-v10.1.patch` (J2 v10.1 is both).  They are applied in number order on
+is two: `J2-919-prefill-a-v13.patch` and `J2-919-prefill-b-v13.patch` (J2 v13 is both).  They are applied in number order on
 rdna-boosts `v17-919794500-r331`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
-order: J1 attention v4.3, J2 prefill-a v10.1, J3 decode v5.2, J4 sampling v1, J5 speculative v3.1, J6 step v9.2, J7 state v1.3,
-J2 prefill-b v10.1.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
+order: J1 attention v4.3, J2 prefill-a v13, J3 decode v5.2, J4 sampling v1, J5 speculative v3.1, J6 step v9.2, J7 state v1.3,
+J2 prefill-b v13.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
 a group adapted to a new base, nothing else; its next change drops the decimal.
 
 Types: `speed` = faster, the same output; `memory` = less VRAM, the same output; `speed/diff` = faster, output not
@@ -22,14 +22,13 @@ KLD as multiples of the run-to-run floor (zh / en): Qwen3.8-27B official UD-Q5_K
 48K-token prefix, against the same build with every switch off.  Generation = the largest of the decode / verify widths 1, 6
 and 16; prompt processing = one 400-token batch.  Floor: generation 0.0017 / 0.0005, prompt processing 0.0057 / 0.0011.
 Speed: the part against the defaults without it (prefill t/s gained; decode time per step saved), 8K / 32K / 110K prompts.
-Measured 2026-11-09 on r235 with a 48K prefix, before 6d was a default (6d: below); the defaults on r269 at 8K and 32K:
+Measured 2026-11-09 on r235 with a 48K prefix (the norm lock, a default from r327 until J2 v13 removed it: below); the defaults on r269 at 8K and 32K:
 the README's [Performance](README.md#performance).
 
 | part | group | KLD, generation | KLD, prompt processing | speed |
 |---|---|---|---|---|
 | K1 (fp8 prefill matmuls) | J2 | 1.42× / 1.72× | 4.01× / 4.35× | prefill +115 / +107 / +83 % |
 | F8 (fp8 prefill attention) | J1 | 1.05× / 1.18× | 1.19× / 1.52× | prefill +12 / +29 / +65 % |
-| 6d, fixed scales of the normalized inputs (on by default from r327) | J2 | within the floor (below) | — | prefill +1.6 / +2.1 / +1.2 % |
 | M4 (MXFP4 weights only) | J2 | 0.0021 / 0.0009 (absolute) | 0.0126 / 0.0035 (absolute) | prefill +69 / +66 / +53 % |
 | mmvk | J3 | 0.82× / 0.59× | 0 | per step −6.5 / −8.2 / −6.1 % |
 | 9-16 row verification | J1 | 0.92× / 1.06× | 0 | copying with a `q8_0` cache: per step −12 % (32K), −29 % (110K) |
@@ -42,15 +41,20 @@ hybrid model with context checkpoints already ends its prompt with a small batch
 every token of a prompt (perplexity); later tokens read the prompt through the KV cache and see the generation column.  For
 prompt scoring set `FRANK_KQ_BLAS=f16` (K1's matmuls in f16: slower, much smaller error).
 
-**6d (J2, on by default from r327)** was measured another way: the KLD against K1 `f16` on 22 kinds of content (400
+**The norm lock (J2, on by default from r327, called 6d at first; removed in J2 v13)** was measured another way: the KLD against K1 `f16` on 22 kinds of content (400
 tokens each), as a multiple of the default fp8's (per-batch scales), against the floor of the default fp8 run at another
 batch split (`-ub 1024`), after a 3,000-token prefix.  With only the normalized residual streams fixed, every kind's KLD
 stayed within that floor, also when the scales were fixed on hexdump, base64 or emoji first; so did top-1 agreement but
 in one case (hexdump after fixing on classical Chinese poetry: 4.25 points lower; f16 at another batch split moves
-hexdump's by 1.75).  qgate passes (zh 1.23×, en 1.19× its floor).  Fixing every K1 input (the earlier opt-in 6d) made
+hexdump's by 1.75).  qgate passes (zh 1.23×, en 1.19× its floor).  Fixing every K1 input (the earlier opt-in 6d, retired) made
 some kinds of content much worse: on hexdump a KLD 10-50× the per-batch default's and top-1 agreement 4.5-8.75 points
 lower.  Speed: prefill +1.6 / +2.1 / +1.2 % at 8K / 32K / 110K against the per-batch default (27B UD-Q4_K_XL, 2 slots),
-measured 2026-11-21 on r324; decode does not reach K1.
+measured 2026-11-21 on r324; decode does not reach K1.  It was removed in J2 v13 (2026-11-24): the scales came from the
+first prompts after the server started, and later inputs outside that range were clipped.  In tool-using conversations
+whose system prompt is text, the numbers in later tool results lost precision in the keys and values they wrote, and
+replies quoting them got worse (22 tool-using questions run twice at temperature 0: 16 of the 44 replies passed with the
+lock, 24 without it).  The KLD above stayed within the floor all the same: it averages over every position, and few of
+them must recall an exact value from the context.
 
 **Lenience (J5, sampling, off by default)** changes the rule that accepts sampled drafts, not the logits, so it has no
 KLD of the kind above.  Its effect on the sampled distribution can be computed exactly at every verified position: at
@@ -93,15 +97,15 @@ The KV cache of the full-attention layers and every kernel that reads it, for pr
 
 ## J2 prefill
 
-The large-batch path apart from attention.  Part a holds everything but 6d, the own f16 GEMM and the tail batch, which are
-part b.  The GLU in place is rdna-boosts' since r323 (`GGML_GLU_INPLACE`).
+The large-batch path apart from attention.  Part a holds everything but the own f16 GEMM, the tail batch, the batch amax of the f16 conversion
+and `fp8b`, which are part b.  The GLU in place is rdna-boosts' since r323 (`GGML_GLU_INPLACE`).
 
 | part | what | switch | type |
 |---|---|---|---|
-| K1 | prefill matmuls of K-quant weights through hipBLASLt in fp8 (or f16), on batches of 384 tokens or more (f16: 640; 1024 on weights under 20M elements); the largest activation channels of each batch get a second fp8 term for their rounding errors in the same GEMM; the residual ADD goes into the GEMM (in f16 too, unless the algorithms are timed) | `FRANK_KQ_BLAS` (`fp8` when every GPU is a gfx1201), `_FP8_KEEP` (64), `_ADD` (on) | speed/lossy |
-| 6d, fixed scales | for the normalized residual streams only (an RMS norm's output times a weight: the q / k / v and gate / up projections' inputs, found from the graph), K1's outlier channels and fp8 scale are fixed from whole prompts at the first decode step, and the norm writes the fp8 activations directly; the other K1 inputs (GLU, attention and Gated DeltaNet outputs) keep per-batch scales.  Part b | `FRANK_KQ_BLAS_FIXED` (2 with K1 fp8; 1 = after `_N` (4) batches, 0 = off) | speed/lossy |
-| own f16 GEMM | a WMMA f16 GEMM that decodes Q4_K / Q5_K / Q6_K / IQ4_XS weights inside the kernel (the same f16 values as K1 f16's conversion, f32 accumulation): with K1 f16 it replaces hipBLASLt from 128 tokens; with K1 fp8 it takes the batches below K1's threshold instead of MMQ.  Part b | `FRANK_KQ_BLAS_OWN` (off) | speed |
-| tail batch | the last 256 tokens of a long prompt in a batch of their own through the own f16 GEMM (or MMQ), so the state and the keys and values the reply starts from are not computed in fp8; with K1 fp8 only, prompts long enough by a cost measured at load.  Part b | `FRANK_KQ_BLAS_TAIL` (off; `own`, `mmq`), `_N` (256), `_MIN_CTX` (`auto`), `_BUDGET` (4.5) | fix |
+| K1 | prefill matmuls of K-quant weights through hipBLASLt in fp8 (or f16), on batches of 384 tokens or more (f16: 640; 1024 on weights under 20M elements); the largest activation channels of each batch get a second fp8 term for their rounding errors in the same GEMM; the residual ADD goes into the GEMM (in f16 too, unless the algorithms are timed) | `FRANK_KQ_BLAS` (`fp8` when every GPU is a gfx1201; `fp8b`: fp8 with the own f16 GEMM and the tail batch on, part b), `_FP8_KEEP` (64), `_ADD` (on) | speed/lossy |
+| own f16 GEMM | a WMMA f16 GEMM that decodes Q4_K / Q5_K / Q6_K / IQ4_XS / Q8_0 weights inside the kernel (the same f16 values as K1 f16's conversion, f32 accumulation): with K1 f16 it replaces hipBLASLt from 128 tokens; with K1 fp8 it takes the batches below K1's threshold instead of MMQ.  Part b | `FRANK_KQ_BLAS_OWN` (off; on with `fp8b`) | speed |
+| batch amax | the f16 conversion of K1 f16 and the own f16 GEMM scales a batch by one power of two from its largest activation: the kernels that write the input (an RMS norm with its weight, a GLU, a gated unary with its multiply) fold their channel maxima into a buffer per stream, and a small kernel takes the largest; without such a producer, one pass of float4 loads over the input; the conversion writes eight values a thread.  The same output.  Part b | — | speed |
+| tail batch | the last 256 tokens of a long prompt in a batch of their own through the own f16 GEMM (or MMQ), so the state and the keys and values the reply starts from are not computed in fp8; with K1 fp8 only, prompts long enough by a cost measured at load.  Part b | `FRANK_KQ_BLAS_TAIL` (off, `own` with `fp8b`; `own`, `mmq`), `_N` (256), `_MIN_CTX` (`auto`), `_BUDGET` (4.5) | fix |
 | prompt tail | a batch of 384 tokens or more that ends its prompts with output tokens hands those outputs to a decode-sized batch, so the logits a prompt ends with do not come from K1's prefill matmuls.  Batches with an output for every token (perplexity), embeddings and non-causal models are unchanged | `FRANK_PP_TAIL` (on), `_MIN` (384) | fix |
 | M4 | MXFP4 weights converted exactly to fp8 for K1's GEMM, from 64 tokens | `FRANK_MXFP4_DIRECT` (`blaslt`) | speed/lossy |
 | draft ubatch | the draft model's ubatch capped at 512: about 0.7 GiB less VRAM with `-ub 2048` | `FRANK_DRAFT_UB` (512) | memory |
@@ -116,18 +120,14 @@ part b.  The GLU in place is rdna-boosts' since r323 (`GGML_GLU_INPLACE`).
   applies before the KV store).  Micikevicius et al. 2022 (above); T. Dettmers et al., "LLM.int8()", arXiv:2208.07339,
   2022; S. Ashkboos et al.,
   "QUIK", arXiv:2310.09259, 2023; Y. Zhao et al., "Atom", MLSys 2024, arXiv:2310.19102 (outlier channels handled apart at
-  higher precision; with 6d, chosen once from calibration).  6d: R. Krishnamoorthi, "Quantizing deep
-  convolutional networks for efficient inference: A whitepaper", arXiv:1806.08342, 2018 (activation ranges from
-  calibration); NVIDIA Transformer Engine's FP8 delayed scaling (scales from earlier batches); Z. Yao, R. Yazdani Aminabadi,
-  M. Zhang, X. Wu, C. Li, Y. He, "ZeroQuant: Efficient and Affordable Post-Training Quantization for Large-Scale
-  Transformers", NeurIPS 2022, arXiv:2206.01861, §4.3 and Appendix D, and Y. Lin, H. Tang, S. Yang, Z. Zhang, G. Xiao,
-  C. Gan, S. Han, "QServe: W4A8KV4 Quantization and System Co-design for Efficient LLM Serving", MLSys 2025,
-  arXiv:2405.04532, §5.1 (the activation quantization fused into the kernel that produces the activation).  K1's channel
+  higher precision).  K1's channel
   amax folded into the kernel that writes the activation (an RMS norm with its weight, a GLU, a gated unary with its
   multiply), the batch scale then taken from the largest channel amax: H. Xi, H. Cai, L. Zhu, Y. Lu, K. Keutzer, J. Chen,
   S. Han, "COAT: Compressing Optimizer states and Activation for Memory-Efficient FP8 Training", ICLR 2025,
   arXiv:2410.19313, Group Scaling (a per-tensor max reduction in two stages, the per-group stage fused into the previous
-  operation); ZeroQuant (above) computes the scale from the values still in the producing kernel's registers.  The prefill / decode split:
+  operation); Z. Yao, R. Yazdani Aminabadi, M. Zhang, X. Wu, C. Li, Y. He, "ZeroQuant: Efficient and Affordable
+  Post-Training Quantization for Large-Scale Transformers", NeurIPS 2022, arXiv:2206.01861, §4.3 and Appendix D, computes
+  the scale from the values still in the producing kernel's registers.  The prefill / decode split:
   A. Panferov et al., "Disaggregated Quantization: Specializing LLM Prefill and Decode", arXiv:2609.26333, 2026 (prefill on
   compute-native low-precision weights, decode on compact weight-only ones).  The residual ADD: J. J. Dongarra, J. Du Croz,
   S. Hammarling, I. S. Duff, "A Set of Level 3 Basic Linear Algebra Subprograms", ACM TOMS 16(1), 1990 (the GEMM's βC term),
@@ -138,6 +138,14 @@ part b.  The GLU in place is rdna-boosts' since r323 (`GGML_GLU_INPLACE`).
   arXiv:2406.06484, §3 (the chunkwise form the own Gated DeltaNet kernel computes); S. Yang, J. Kautz, A. Hatamizadeh,
   "Gated Delta Networks", ICLR 2025, arXiv:2412.06464 (the gated chunkwise algorithm); for M4, the OCP Microscaling Formats (MX)
   Specification v1.0, 2023, and B. D. Rouhani et al., "Microscaling Data Formats for Deep Learning", arXiv:2310.10537.
+  The batch amax of the f16 conversion: the producers' channel maxima as with K1 fp8 (COAT's Group Scaling, above);
+  without such a producer, a grid-stride loop of float4 loads, a shuffle reduction inside the wave and one atomic per wave
+  (M4's activation amax uses the same kernel): M. Harris, "CUDA Pro Tip: Write Flexible Kernels with Grid-Stride Loops",
+  NVIDIA Technical Blog, 2013; J. Luitjens, "Faster Parallel Reductions on Kepler", NVIDIA Technical Blog, 2014;
+  J. Luitjens, "CUDA Pro Tip: Increase Performance with Vectorized Memory Access", NVIDIA Technical Blog, 2013; the
+  maximum of non-negative floats compared as unsigned integers: D. Goldberg, "What Every Computer Scientist Should Know
+  About Floating-Point Arithmetic", ACM Computing Surveys, March 1991.  The f16 scale, a power of two from the amax's
+  exponent: Rouhani et al. (above), Algorithm 1; Micikevicius et al. 2018 (above), §3.2.
 
 ## J3 decode / verify
 
@@ -242,6 +250,22 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-24: J2 v13, a fix** (part a as in v10.1; v11 and v12 were not published here).
+- The norm lock is removed with its switches (`FRANK_KQ_BLAS_FIXED` and its tuning; the server warns when one is set):
+  every K1 batch takes its own scales and KEEP channels again, as `FRANK_KQ_BLAS_FIXED=0` did.  Why:
+  [lossy parts](#lossy-parts).  The default output is the same as v10.1 with `FRANK_KQ_BLAS_FIXED=0` (22 server requests
+  on UD-Q4_K_XL with 2 slots); prefill gives back the lock's 1.2-2.1 %.  The rest of this entry is opt-in or gives the
+  same output.
+- The own f16 GEMM (`FRANK_KQ_BLAS_OWN`, and `fp8b`) takes Q8_0 weights too: eight 32-value blocks a 256-value super-block,
+  decoded into the same halfs as K1's Q8_0 conversion.  With K1 `fp8` it replaces MMQ for Q8_0 batches below K1's threshold
+  (0.91-1.02x its time); the dense weights of models quantized with Q8_0 throughout now also run in f16 there.
+- `FRANK_KQ_BLAS=fp8b`: K1 fp8 with the tail batch (`FRANK_KQ_BLAS_TAIL=own`) and the own f16 GEMM for the batches below
+  K1's threshold (`FRANK_KQ_BLAS_OWN=1`) on unless those are set: the recoveries whose share of the fp8 error taken back
+  (against K1 `f16`) is larger than their share of the time `f16` adds.  `fp8` and the default are unchanged.
+- The batch amax of the f16 conversion (K1 `f16`, the own f16 GEMM) comes from the channel maxima the producing kernels
+  fold in, or else from one float4 pass; the conversion writes eight values a thread.  The same output; per 2048-token
+  batch 2.1 % less time with the own f16 GEMM, 2.7 % with K1 `f16`.
 
 **2026-11-22: docs.**  J2's references add COAT (Xi et al., ICLR 2025) for K1's channel amax folded into the kernel
 that writes the activation, with ZeroQuant's register-side scale.  No patch changes.

@@ -15,14 +15,14 @@ The papers each part follows, and thanks: [STRUCTURE.md](STRUCTURE.md).  Patches
 ## Structure
 
 The main pipeline has been rebuilt.  This repo's earlier patches (0001-0015) and a new GPU-resident speculative pipeline
-are merged into seven groups, numbered in the order of inference.  Each is one patch, except J2, which is two (J2 v10 is
+are merged into seven groups, numbered in the order of inference.  Each is one patch, except J2, which is two (J2 v13 is
 both files): its part b is applied last, after J7, because it needs J4-J7's server and state code.  The order: J1, J2
 part a, J3, J4, J5, J6, J7, J2 part b.
 
 | group | part of the engine | what changes | type |
 |---|---|---|---|
 | J1 | attention | the full-attention layers' KV cache and every kernel that reads it: fp8 prefill attention, a `q8_0r` cache with a batch-invariant decode / verify kernel, 9-16 row verification through the decode kernel | speed/lossy, speed |
-| J2 | prefill | part a: large-batch matmuls in fp8 through hipBLASLt (K-quant and MXFP4 weights), fused Gated DeltaNet prefill on an own chunked kernel, the logits a prompt ends with from a decode-sized batch; part b (applied last): K1's fp8 scales fixed for the normalized inputs after the first decode step (6d), an own WMMA f16 GEMM and an f16 batch for a long prompt's last tokens (both opt-in) | speed/lossy, memory, speed, fix |
+| J2 | prefill | part a: large-batch matmuls in fp8 through hipBLASLt (K-quant and MXFP4 weights), fused Gated DeltaNet prefill on an own chunked kernel, the logits a prompt ends with from a decode-sized batch; part b (applied last): an own WMMA f16 GEMM and an f16 batch for a long prompt's last tokens (both opt-in; both on with `FRANK_KQ_BLAS=fp8b`), the f16 conversion's batch amax from the kernels that write its input | speed/lossy, memory, speed, fix |
 | J3 | decode / verify | 1-16 token matmuls; Gated DeltaNet draft verification with two state planes instead of one per draft token; fused decode ops; the draft model's output layer scored from an int2 copy, its best candidates recomputed exactly | speed/diff, memory, speed |
 | J4 | sampling | an end of turn sampled inside the reasoning becomes the reasoning's end tag | guard |
 | J5 | speculative decoding | the draft width from the acceptance, drafts of one length for slots verifying together, n-gram drafts from the prompt, an opt-in lenience for sampled drafts | speed, speed/trade-off, sampling |
@@ -56,9 +56,10 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
   which give the same bits.  Prompt processing: one 400-token batch, as in tools that score every token of a prompt (a
   reply's first token comes from a decode-sized batch: the prompt tail, J2).  Floor, generation: 0.0028 / 0.0008 (8K),
   0.0026 / 0.0004 (32K); prompt processing: 0.0079 / 0.0014 (8K), 0.0071 / 0.0007 (32K).
-- r327 (2026-11-21) added two defaults the table does not include: 6d (J2: K1's fp8 scales fixed for the normalized inputs
+- r327 (2026-11-21) added two defaults the table does not include: the norm lock (J2, then called 6d: K1's fp8 scales fixed for the normalized inputs
   after the first decode step; prefill +1.6 / +2.1 / +1.2 % at 8K / 32K / 110K on UD-Q4_K_XL with 2 slots, KLD within
-  the floor of the per-batch scales on 22 kinds of content: [STRUCTURE.md](STRUCTURE.md#lossy-parts)) and rdna-boosts' KQ
+  the floor of the per-batch scales on 22 kinds of content: [STRUCTURE.md](STRUCTURE.md#lossy-parts); removed in J2 v13,
+  below) and rdna-boosts' KQ
   block table reuse (J1, the same output).
 - J2 v10 (2026-11-22) changes one more default the table does not include: Gated DeltaNet prefill runs on an own chunked
   kernel instead of rdna-boosts' (`FRANK_GDN_OWN`).  Against J2 v9: prefill -0.3 / -0.2 / -0.2 % at 8K / 32K / 110K on
@@ -72,6 +73,15 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
   set: rdna-boosts' re-base had dropped its allocator rules (the GLU in place among them), and its r331 restores them.
   Pinned at r331 since: against r329, 0.19 GiB less VRAM, the same tokens and draft acceptance, prefill and decode
   within 0.5 %.
+- J2 v13 (2026-11-24, a fix): the norm lock is removed, and every K1 batch takes its own scales again (what
+  `FRANK_KQ_BLAS_FIXED=0` did).  It fixed the scales from the first prompts after the server started and clipped later
+  inputs outside that range.  In tool-using conversations with a plain-text system prompt, the numbers in later tool
+  results lost precision in the keys and values they wrote, and replies quoting them got worse: on 22 tool-using
+  questions run twice at temperature 0, 16 of the 44 replies passed with the lock and 24 without it.  Its KLD had stayed
+  within the floor: an average over every position hides the few that must recall an exact value from the context.
+  Prefill gives back the lock's 1.2-2.1 %.  The default output is the same as v10.1 with `FRANK_KQ_BLAS_FIXED=0` (22
+  server requests on UD-Q4_K_XL with 2 slots); the other changes since v10.1 are opt-in or give the same output
+  ([STRUCTURE.md](STRUCTURE.md#change-log)).
 
 ### History
 
@@ -139,7 +149,7 @@ memory pressure, 23 stalls (1.16 s over 19 requests) became none, with the same 
 mmap) they count against the driver's limit.
 
 **Switches.**  Every part has an environment variable, read once at startup.  Everything is on by default, the lossy K1,
-F8, M4 and 6d included (F8 and M4 are part of what the numbers above measure; 6d is newer), except the parts marked opt-in.
+F8 and M4 included (they are part of what the numbers above measure), except the parts marked opt-in.
 `0` turns a part off; `FRANK_ALL=0` turns off every part that changes values or the order of work, and that build is the
 KLD reference above.  Every switch, its values and its default: [SWITCHES.md](SWITCHES.md).
 
