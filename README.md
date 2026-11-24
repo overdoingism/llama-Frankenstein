@@ -5,6 +5,16 @@ R9700).  They sew techniques from published papers onto llama.cpp and rdna-boost
 others: hence the name.  The optimizations target dense models: on a MoE model the experts' matmuls stay on the
 rdna-boosts paths, and only the parts outside them gain.
 
+**Pinned target (recommended).**  What the patches are built and measured on; other versions are not tested.  Full SHAs,
+trees and where to get each: [BUILD.md](BUILD.md).
+
+| | version |
+|---|---|
+| llama.cpp | master `919794500` (build `b12597`) |
+| llama-cpp-rdna-boosts | `v17-919794500-r331` |
+| ROCm | 10.0.0 (AMD's TheRock packages; the libraries loaded at run time come from it too) |
+| HIP compiler | the clang ROCm 10.0.0 ships: AMD clang 23.0.0git (ROCm llvm-project `8f497e0992fb`) |
+
 | code from | license | what it gave |
 |---|---|---|
 | [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) | MIT | the engine; the WMMA tile helpers (`mma.cuh`) of J2's own Gated DeltaNet kernel and own f16 GEMM |
