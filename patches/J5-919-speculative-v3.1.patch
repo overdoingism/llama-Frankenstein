@@ -1,8 +1,8 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index f4e5c8481..c75b89de4 100644
+index 35e97425b..cb237e4d9 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -4684,12 +4684,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -4705,12 +4705,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
      ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_TYPE"));
      add_opt(common_arg(
          {"--spec-ngram-mod-n-min"}, "N",
@@ -18,7 +18,7 @@ index f4e5c8481..c75b89de4 100644
      ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 6a49f1017..68be3343a 100644
+index 727840f63..049abe114 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -304,6 +304,12 @@ struct common_params_sampling {
@@ -218,7 +218,7 @@ index f19bd27c4..49e56aea2 100644
  std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const std::vector<std::vector<llama_token_data>> & draft_q, bool grammar_first = false);
  
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 3d934b0b2..382f1d757 100644
+index 9713e919b..98375f5c5 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -14,6 +14,7 @@
@@ -674,7 +674,7 @@ index 3d934b0b2..382f1d757 100644
  };
  
  static common_ngram_map get_common_ngram_map(
-@@ -4023,6 +4329,7 @@ static_assert(COMMON_SPECULATIVE_TYPE_COUNT == 14);
+@@ -4032,6 +4338,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
          /* .impls       = */ std::move(impls),
          /* .impl_last   = */ std::vector<common_speculative_impl *>(n_seq, nullptr),
          /* .synth_probs = */ {},
@@ -682,7 +682,7 @@ index 3d934b0b2..382f1d757 100644
      });
  
      const int32_t n_max_configured = common_speculative_n_max(&params);
-@@ -4112,6 +4419,13 @@ void common_speculative_draft(common_speculative * spec) {
+@@ -4121,6 +4428,13 @@ void common_speculative_draft(common_speculative * spec) {
  
      auto & dparams = spec->dparams;
  
@@ -696,7 +696,7 @@ index 3d934b0b2..382f1d757 100644
      {
          int n_drafting = 0;
  
-@@ -4129,6 +4443,17 @@ void common_speculative_draft(common_speculative * spec) {
+@@ -4138,6 +4452,17 @@ void common_speculative_draft(common_speculative * spec) {
      }
  
      for (auto & impl : spec->impls) {
@@ -714,7 +714,7 @@ index 3d934b0b2..382f1d757 100644
          {
              common_time_meas tm(impl->t_draft_us, !impl->gen_perf);
              impl->draft(dparams);
-@@ -4193,6 +4518,37 @@ void common_speculative_draft(common_speculative * spec) {
+@@ -4202,6 +4527,37 @@ void common_speculative_draft(common_speculative * spec) {
              dp.drafting = false;
          }
      }
@@ -781,10 +781,10 @@ index eec23b49d..abb754846 100644
      // WIP r42 (TODO #42): release the context's grow-only compute buffers so the next graph re-reserves
      // them from that graph.  Used to make the MTP draft context reserve lazily (after the target's
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 49ef60fbb..319e4a6f2 100644
+index a04f7db81..6af56e420 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -6755,6 +6755,10 @@ uint32_t llama_n_ctx_seq(const llama_context * ctx) {
+@@ -6796,6 +6796,10 @@ uint32_t llama_n_ctx_seq(const llama_context * ctx) {
      return ctx->n_ctx_seq();
  }
  
@@ -796,7 +796,7 @@ index 49ef60fbb..319e4a6f2 100644
      return ctx->n_batch();
  }
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index fa742f066..6d8a8be11 100644
+index f8bbb3789..618619336 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -811,6 +811,14 @@ struct server_slot {

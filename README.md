@@ -11,7 +11,7 @@ trees and where to get each: [BUILD.md](BUILD.md).
 | | version |
 |---|---|
 | llama.cpp | master `919794500` (build `b12597`) |
-| llama-cpp-rdna-boosts | `v17-919794500-r331` |
+| llama-cpp-rdna-boosts | `v18-919794500-r359` |
 | ROCm | 10.0.0 (AMD's TheRock packages; the libraries loaded at run time come from it too) |
 | HIP compiler | the clang ROCm 10.0.0 ships: AMD clang 23.0.0git (ROCm llvm-project `8f497e0992fb`) |
 
@@ -25,14 +25,14 @@ The papers each part follows, and thanks: [STRUCTURE.md](STRUCTURE.md).  Patches
 ## Structure
 
 The main pipeline has been rebuilt.  This repo's earlier patches (0001-0015) and a new GPU-resident speculative pipeline
-are merged into seven groups, numbered in the order of inference.  Each is one patch, except J2, which is two (J2 v13 is
+are merged into seven groups, numbered in the order of inference.  Each is one patch, except J2, which is two (J2 v15 is
 both files): its part b is applied last, after J7, because it needs J4-J7's server and state code.  The order: J1, J2
 part a, J3, J4, J5, J6, J7, J2 part b.
 
 | group | part of the engine | what changes | type |
 |---|---|---|---|
-| J1 | attention | the full-attention layers' KV cache and every kernel that reads it: fp8 prefill attention, a `q8_0r` cache with a batch-invariant decode / verify kernel, 9-16 row verification through the decode kernel | speed/lossy, speed |
-| J2 | prefill | part a: large-batch matmuls in fp8 through hipBLASLt (K-quant and MXFP4 weights), fused Gated DeltaNet prefill on an own chunked kernel, the logits a prompt ends with from a decode-sized batch; part b (applied last): an own WMMA f16 GEMM and an f16 batch for a long prompt's last tokens (both opt-in; both on with `FRANK_KQ_BLAS=fp8b`), the f16 conversion's batch amax from the kernels that write its input | speed/lossy, memory, speed, fix |
+| J1 | attention | the full-attention layers' KV cache and every kernel that reads it: fp8 prefill attention, a `q8_0r` cache with a batch-invariant decode / verify kernel (for the layers it takes), 9-16 row verification through the decode kernel | speed/lossy, speed |
+| J2 | prefill | part a: large-batch matmuls in fp8 through hipBLASLt (K-quant and MXFP4 weights), fused Gated DeltaNet prefill on an own chunked kernel, the logits a prompt ends with from a decode-sized batch; part b (applied last): an own WMMA f16 GEMM and an f16 batch for a long prompt's last tokens (both opt-in; both on with `FRANK_KQ_BLAS=fp8b`), the f16 conversion's batch amax from the kernels that write its input, fp8 scales as powers of two, the output projections in f16 (opt-in) | speed/lossy, memory, speed, fix |
 | J3 | decode / verify | 1-16 token matmuls; Gated DeltaNet draft verification with two state planes instead of one per draft token; fused decode ops; the draft model's output layer scored from an int2 copy, its best candidates recomputed exactly | speed/diff, memory, speed |
 | J4 | sampling | an end of turn sampled inside the reasoning becomes the reasoning's end tag | guard |
 | J5 | speculative decoding | the draft width from the acceptance, drafts of one length for slots verifying together, n-gram drafts from the prompt, an opt-in lenience for sampled drafts | speed, speed/trade-off, sampling |
@@ -81,8 +81,8 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
   prefix, zh / en, with the same top-10 log-probs), the same time per step and the same draft acceptance; the 32K prompt:
   2784 / 62.8 (r327: 2784 / 62.6).  On r329 the prefill compute buffer was 0.19 GiB larger, plain r329 as much as this
   set: rdna-boosts' re-base had dropped its allocator rules (the GLU in place among them), and its r331 restores them.
-  Pinned at r331 since: against r329, 0.19 GiB less VRAM, the same tokens and draft acceptance, prefill and decode
-  within 0.5 %.
+  Pinned at r331 from then until r359 (below): against r329, 0.19 GiB less VRAM, the same tokens and draft acceptance,
+  prefill and decode within 0.5 %.
 - J2 v13 (2026-11-24, a fix): the norm lock is removed, and every K1 batch takes its own scales again (what
   `FRANK_KQ_BLAS_FIXED=0` did).  It fixed the scales from the first prompts after the server started and clipped later
   inputs outside that range.  In tool-using conversations with a plain-text system prompt, the numbers in later tool
@@ -92,6 +92,12 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
   Prefill gives back the lock's 1.2-2.1 %.  The default output is the same as v10.1 with `FRANK_KQ_BLAS_FIXED=0` (22
   server requests on UD-Q4_K_XL with 2 slots); the other changes since v10.1 are opt-in or give the same output
   ([STRUCTURE.md](STRUCTURE.md#change-log)).
+- r359 (2026-11-26): J1 v5, J2 v15, J3 v5.3, J6 v10.1, J7 v2 on rdna-boosts `v18-919794500-r359`
+  ([STRUCTURE.md](STRUCTURE.md#change-log)).  **The default output changes**: the fp8 scales of K1, M4 and F8 are powers of
+  two (J2 v15).  With that switched off (`FRANK_FP8_POW2=0`), 22 server requests on UD-Q4_K_XL with 2 slots give the same
+  text as the groups before them on r353 and r358.  With the defaults: the time per decode step the same at 8K and 0.6 %
+  less at 110K (UD-Q4_K_XL, 2 slots), the 32K prompt 2736 / 64.4 (UD-Q5_K_M; r358: 2737 / 61.9, the decode tokens
+  differ), and qgate passes (KLD 1.33× / 1.10× the floor, zh / en).
 
 ### History
 
@@ -114,7 +120,7 @@ here.
 | what | pinned at |
 |---|---|
 | llama.cpp | commit `919794500475862f6768c353255469dc661cb734` (master, build `b12597`) |
-| llama-cpp-rdna-boosts | release `v17-919794500-r331`, commit `5d442e27e3a20243ca34dc99c7d8a50d6035bd15`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v17-919794500-r331` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
+| llama-cpp-rdna-boosts | release `v18-919794500-r359`, commit `a0e7e62b9dc748ecfe1902101084c46c244748fe`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v18-919794500-r359` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
 | this repository | the eight patch files in [`patches/`](patches), all of them, in the order J1, J2 part a, J3 to J7, J2 part b |
 | ROCm | 10.0.0 with hipBLASLt, the HIP code compiled for gfx1201 |
 
@@ -144,7 +150,7 @@ HSA_USERPTR_FOR_PAGED_MEM=0 ./llama-server -m Qwen3.8-27B-UD-Q5_K_M.gguf -ngl 99
 | parameter | why |
 |---|---|
 | `-ub 2048 -b 2048` | J2's prefill matmuls are fastest on 2048-token batches (and take small weights only from 1024 tokens).  The compute buffer grows by about 1.1 MiB per ubatch token: lower it (e.g. 1536) if a long context does not fit. |
-| `-fa on -ctk q8_0r -ctv q8_0r` | J1's `q8_0r` cache (the same memory as `q8_0`) and its decode / verify kernel.  The fp8 prefill attention runs on `q8_0r` and `q8_0`, the 9-16 row halves only on `q8_0`.  A layer whose head size is not a multiple of 256 (the DFlash2 draft model's) keeps `q8_0` and logs it. |
+| `-fa on -ctk q8_0r -ctv q8_0r` | J1's `q8_0r` cache (the same memory as `q8_0`) and its decode / verify kernel.  The fp8 prefill attention runs on `q8_0r` and `q8_0`, the 9-16 row halves only on `q8_0`.  A layer the `q8_0r` kernel does not take (a head size other than 256, as the DFlash2 draft model's; more than 6 query heads per KV head; attention sinks) keeps `q8_0` and logs it. |
 | `-md ... -ngld 99 --spec-draft-n-max 5`, `--spec-type draft-dflash` | The DFlash2 draft model, for Qwen3.8-27B only ([z-lab/Qwen3.8-27B-DFlash2-GGUF](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF), Q4_K_M).  The adaptive width, the int2 draft head and the GPU-resident loop act only with it; mmvk's default and the Gated DeltaNet verification act with any drafts.  With any other model leave out the last three lines. |
 | `--spec-draft-sampling probabilistic` | llama.cpp's own: sampled drafts, verified exactly by rejection sampling (it matters at temperature > 0).  J5's lenience (lossy, off by default) builds on it. |
 | `--spec-type ngram-mod,draft-dflash --spec-ngram-mod-n-max 15 --spec-ngram-mod-n-match 30` | Not in the command above.  J5's n-gram drafts from the prompt act only with an n-gram type, put before DFlash2; with them the n-min defaults to 1. |

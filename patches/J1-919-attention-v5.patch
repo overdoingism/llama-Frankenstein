@@ -1,5 +1,5 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index c041d8406..f4e5c8481 100644
+index dedf56bf4..35e97425b 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -284,6 +284,7 @@ const std::vector<ggml_type> kv_cache_types = {
@@ -183,10 +183,10 @@ index f04be52f5..30d5c6f0e 100644
  void ggml_vec_dot_mxfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  void ggml_vec_dot_nvfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
-index 2f4048ac6..5cf30be1b 100644
+index 7400abbe2..4aa7e3d4e 100644
 --- a/ggml/src/ggml-cuda/common.cuh
 +++ b/ggml/src/ggml-cuda/common.cuh
-@@ -1689,9 +1689,32 @@ void   ggml_cuda_h2d_ring_cap_set(size_t bytes);
+@@ -1711,9 +1711,32 @@ void   ggml_cuda_h2d_ring_cap_set(size_t bytes);
  // The per-operand cap GGML_CUDA_FA_STAGE_MAX_MB resolves to (0 = unbounded): a staging request
  // larger than this is not staged at all.  Shared by launch_fattn and the --fit accounting of the
  // staging arena (ggml_backend_cuda_fattn_stage_bound).
@@ -220,19 +220,19 @@ index 2f4048ac6..5cf30be1b 100644
      }();
      return stage_max_bytes;
 diff --git a/ggml/src/ggml-cuda/convert.cu b/ggml/src/ggml-cuda/convert.cu
-index eaaadd427..6cfbae4b7 100644
+index e63153b15..120867aa5 100644
 --- a/ggml/src/ggml-cuda/convert.cu
 +++ b/ggml/src/ggml-cuda/convert.cu
-@@ -509,6 +509,8 @@ to_bf16_cuda_t ggml_get_to_bf16_cuda(ggml_type type) {
-             return dequantize_block_cont_cuda<QK5_1, QR5_1, dequantize_q5_1>;
-         case GGML_TYPE_Q8_0:
-             return dequantize_block_cont_cuda<QK8_0, QR8_0, dequantize_q8_0>;
+@@ -539,6 +539,8 @@ to_bf16_cuda_t ggml_get_to_bf16_cuda(ggml_type type) {
+             return dequantize_row_tq1_0_cuda;
+         case GGML_TYPE_TQ2_0:
+             return dequantize_row_tq2_0_cuda;
 +        case GGML_TYPE_Q8_0R:
 +            return dequantize_block_cont_cuda<QK8_0R, QR8_0R, dequantize_q8_0r>;
          case GGML_TYPE_Q2_K:
              return dequantize_row_q2_K_cuda;
          case GGML_TYPE_Q3_K:
-@@ -566,6 +568,8 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
+@@ -596,6 +598,8 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
              return dequantize_block_cont_cuda<QK5_0, QR5_0, dequantize_q5_0>;
          case GGML_TYPE_Q5_1:
              return dequantize_block_cont_cuda<QK5_1, QR5_1, dequantize_q5_1>;
@@ -241,16 +241,16 @@ index eaaadd427..6cfbae4b7 100644
          case GGML_TYPE_Q8_0:
              if (fp16_available(ggml_cuda_info().devices[ggml_cuda_get_device()].cc)) {
                  return dequantize_block_q8_0_f16_cuda;
-@@ -630,6 +634,8 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
-             return dequantize_block_cont_cuda<QK5_1, QR5_1, dequantize_q5_1>;
-         case GGML_TYPE_Q8_0:
-             return dequantize_block_cont_cuda<QK8_0, QR8_0, dequantize_q8_0>;
+@@ -668,6 +672,8 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
+             return dequantize_row_tq1_0_cuda;
+         case GGML_TYPE_TQ2_0:
+             return dequantize_row_tq2_0_cuda;
 +        case GGML_TYPE_Q8_0R:
 +            return dequantize_block_cont_cuda<QK8_0R, QR8_0R, dequantize_q8_0r>;
          case GGML_TYPE_Q2_K:
              return dequantize_row_q2_K_cuda;
          case GGML_TYPE_Q3_K:
-@@ -695,6 +701,8 @@ to_fp16_nc_cuda_t ggml_get_to_fp16_nc_cuda(ggml_type type) {
+@@ -733,6 +739,8 @@ to_fp16_nc_cuda_t ggml_get_to_fp16_nc_cuda(ggml_type type) {
              return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
          case GGML_TYPE_F8_E4M3:
              return convert_unary_cuda<ggml_fp8_e4m3_t>;
@@ -259,7 +259,7 @@ index eaaadd427..6cfbae4b7 100644
          case GGML_TYPE_BF16:
              return convert_unary_cuda<nv_bfloat16>;
          default:
-@@ -724,6 +732,8 @@ to_bf16_nc_cuda_t ggml_get_to_bf16_nc_cuda(ggml_type type) {
+@@ -762,6 +770,8 @@ to_bf16_nc_cuda_t ggml_get_to_bf16_nc_cuda(ggml_type type) {
              return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
          case GGML_TYPE_F8_E4M3:
              return convert_unary_cuda<ggml_fp8_e4m3_t>;
@@ -268,7 +268,7 @@ index eaaadd427..6cfbae4b7 100644
          case GGML_TYPE_F16:
              return convert_unary_cuda<half, nv_bfloat16>;
          default:
-@@ -753,6 +763,8 @@ to_fp32_nc_cuda_t ggml_get_to_fp32_nc_cuda(ggml_type type) {
+@@ -791,6 +801,8 @@ to_fp32_nc_cuda_t ggml_get_to_fp32_nc_cuda(ggml_type type) {
              return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
          case GGML_TYPE_F8_E4M3:
              return convert_unary_cuda<ggml_fp8_e4m3_t>;
@@ -383,7 +383,7 @@ index 6e1fda112..7b6bebf19 100644
          ggml_cpy_f32_q4_0_cuda
                  (src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream);
 diff --git a/ggml/src/ggml-cuda/dequantize.cuh b/ggml/src/ggml-cuda/dequantize.cuh
-index a8cf54eb5..b58e33c1a 100644
+index bb245e930..bfc5af3a9 100644
 --- a/ggml/src/ggml-cuda/dequantize.cuh
 +++ b/ggml/src/ggml-cuda/dequantize.cuh
 @@ -132,6 +132,18 @@ static __device__ __forceinline__ void dequantize_q8_0(const void * vx, const in
@@ -406,7 +406,7 @@ index a8cf54eb5..b58e33c1a 100644
  
  // Each call dequantizes one super-block of QK_K values into y using the
 diff --git a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common.cuh
-index 0e23194bc..815e73966 100644
+index e6687996b..2d24817bd 100644
 --- a/ggml/src/ggml-cuda/fattn-common.cuh
 +++ b/ggml/src/ggml-cuda/fattn-common.cuh
 @@ -28,7 +28,7 @@ static inline bool ggml_cuda_fattn_kq_block_skip_enabled() {
@@ -1040,7 +1040,7 @@ index 000000000..541c525a4
 +bool ggml_cuda_flash_attn_ext_q8r_applies(int cc, const ggml_tensor * dst);
 +void ggml_cuda_flash_attn_ext_q8r(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
-index 227c79024..dd00fd89d 100644
+index a22a4988c..9bdd963e1 100644
 --- a/ggml/src/ggml-cuda/fattn.cu
 +++ b/ggml/src/ggml-cuda/fattn.cu
 @@ -4,6 +4,8 @@
@@ -1094,7 +1094,7 @@ index 227c79024..dd00fd89d 100644
  #ifndef FLASH_ATTN_AVAILABLE
      GGML_UNUSED(device); GGML_UNUSED(dst);
      return BEST_FATTN_KERNEL_NONE;
-@@ -927,7 +963,9 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+@@ -936,7 +972,9 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
      GGML_ASSERT(K != nullptr);
      GGML_ASSERT(V != nullptr);
  
@@ -1105,7 +1105,7 @@ index 227c79024..dd00fd89d 100644
  
      bool need_f16_K = false;
      bool need_f16_V = false;
-@@ -976,9 +1014,148 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+@@ -985,9 +1023,148 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
  }
  
  thread_local ggml_cuda_fa_had_req ggml_cuda_fa_had;
@@ -1254,7 +1254,7 @@ index 227c79024..dd00fd89d 100644
      switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
          case BEST_FATTN_KERNEL_NONE:
              GGML_ABORT("fatal error");
-@@ -1026,10 +1203,17 @@ bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
+@@ -1035,10 +1212,17 @@ bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
  // with a 25.7k-token parked slot) and expected to matter only where a launch is expensive (Windows/WDDM).  It is in
  // the default set because it is exact and cheap (64 KiB, outside the pool, so --fit does not see it), not because it
  // buys anything here; `patches/README.md` block 10 and WORKLOG 261120.004 carry that record.
@@ -1274,11 +1274,11 @@ index 227c79024..dd00fd89d 100644
      return on;
  }
 diff --git a/ggml/src/ggml-cuda/getrows.cu b/ggml/src/ggml-cuda/getrows.cu
-index 16421bb49..df0c4b976 100644
+index 0bf2444ce..525d9a7ee 100644
 --- a/ggml/src/ggml-cuda/getrows.cu
 +++ b/ggml/src/ggml-cuda/getrows.cu
-@@ -369,6 +369,10 @@ static void ggml_cuda_get_rows_switch_src0_type(
-             get_rows_cuda_q<QK8_0, QR8_0, dequantize_q8_0>(src0_d, src1_d, dst_d,
+@@ -377,6 +377,10 @@ static void ggml_cuda_get_rows_switch_src0_type(
+             get_rows_cuda_kq<64, dst_t, dequantize_tq2_0<dst_t>>(src0_d, src1_d, dst_d,
                  ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
              break;
 +        case GGML_TYPE_Q8_0R:
@@ -1289,10 +1289,10 @@ index 16421bb49..df0c4b976 100644
              get_rows_cuda_kq<64, dst_t, dequantize_q2_K<dst_t>>(src0_d, src1_d, dst_d,
                  ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
 diff --git a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
-index 3988b11cc..71747a1c6 100644
+index 558d46a24..c91fd7d93 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
-@@ -1055,7 +1055,7 @@ static int ggml_cuda_rope_fwht_count(const ggml_cgraph * cgraph, const int i, co
+@@ -1063,7 +1063,7 @@ static int ggml_cuda_rope_fwht_count(const ggml_cgraph * cgraph, const int i, co
          const ggml_tensor * idx = sr->src[1];
          return view->op == GGML_OP_VIEW && view->type == GGML_TYPE_F32 && ggml_is_contiguous(view) &&
                 view->ne[0] == row_len && view->ne[1] == n_tok && view->ne[2] == 1 && view->ne[3] == 1 &&
@@ -1301,7 +1301,7 @@ index 3988b11cc..71747a1c6 100644
                 sr->ne[0] == row_len && sr->ne[2] == 1 && sr->ne[3] == 1 &&
                 idx->type == GGML_TYPE_I64 && ggml_is_contiguous(idx) && idx->ne[0] == n_tok && ggml_nelements(idx) == n_tok;
      };
-@@ -1233,7 +1233,7 @@ static int ggml_cuda_rms_norm_mul_rope_fwht_set_rows_count(const ggml_cgraph * c
+@@ -1241,7 +1241,7 @@ static int ggml_cuda_rms_norm_mul_rope_fwht_set_rows_count(const ggml_cgraph * c
          const ggml_tensor * idx = sr->src[1];
          return view->op == GGML_OP_VIEW && view->type == GGML_TYPE_F32 && ggml_is_contiguous(view) &&
                 view->ne[0] == row_len && view->ne[1] == n_tok && view->ne[2] == 1 && view->ne[3] == 1 &&
@@ -1311,10 +1311,10 @@ index 3988b11cc..71747a1c6 100644
                 idx->type == GGML_TYPE_I64 && ggml_is_contiguous(idx) && idx->ne[0] == n_tok && ggml_nelements(idx) == n_tok;
      };
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 22a5deafb..716051b05 100644
+index 18362ec5b..9e7a35de3 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -11298,6 +11298,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11376,6 +11376,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                      case GGML_TYPE_Q5_1:
                      case GGML_TYPE_Q8_0:
                      case GGML_TYPE_F8_E4M3:
@@ -1322,7 +1322,7 @@ index 22a5deafb..716051b05 100644
                      case GGML_TYPE_Q2_K:
                      case GGML_TYPE_Q3_K:
                      case GGML_TYPE_Q4_K:
-@@ -11332,7 +11333,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11410,7 +11411,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                             (
                                 (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 || op->type == GGML_TYPE_F8_E4M3 ||
                                 op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
@@ -1332,7 +1332,7 @@ index 22a5deafb..716051b05 100644
                                 (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_BF16)
                             ) || (
                                 op->type == GGML_TYPE_F16 && op->src[0]->type == GGML_TYPE_F16
-@@ -11372,6 +11374,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11450,6 +11452,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                  if (src0_type == GGML_TYPE_Q8_0 && src1_type == GGML_TYPE_F32) {
                      return true;
                  }
@@ -2686,10 +2686,10 @@ index bcff734f4..c3b610fd8 100644
          case GGML_TYPE_NVFP4:   result = quantize_nvfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
          case GGML_TYPE_F8_E4M3: result = quantize_f8_e4m3(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 8518e09fe..adeebe748 100644
+index 7656b95b8..be4e0e7d7 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -6676,7 +6676,8 @@ llama_context * llama_init_from_model(
+@@ -6717,7 +6717,8 @@ llama_context * llama_init_from_model(
      }
  
      if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_k)) {
@@ -2699,7 +2699,7 @@ index 8518e09fe..adeebe748 100644
          for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
              if (model->hparams.n_embd_head_k(il) % blck_size != 0) {
                  LLAMA_LOG_ERROR("%s: K cache type %s with block size %u does not divide n_embd_head_k=%u\n",
-@@ -6687,7 +6688,8 @@ llama_context * llama_init_from_model(
+@@ -6728,7 +6729,8 @@ llama_context * llama_init_from_model(
      }
  
      if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_v)) {
@@ -2710,19 +2710,35 @@ index 8518e09fe..adeebe748 100644
              if (model->hparams.n_embd_head_v(il) % blck_size != 0) {
                  LLAMA_LOG_ERROR("%s: V cache type %s with block size %u does not divide n_embd_head_v=%u\n",
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 8c3e89419..ece838d0c 100644
+index 8c3e89419..29534b698 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -1060,8 +1060,18 @@ llama_kv_cache::llama_kv_cache(
+@@ -1060,8 +1060,34 @@ llama_kv_cache::llama_kv_cache(
          const bool has_k = true;
          const bool has_v = !is_mla && v_enabled;
  
 -        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx_kv, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
 -        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx_kv, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
-+        // q8_0r holds whole 256-value rows: a layer whose head dim is not a multiple of 256 keeps q8_0 (the same values)
++        // q8_0r holds the same values as q8_0, laid out for its own readers: the q8r decode / verify kernel (fattn-q8r.cu: head 256,
++        // at most 48 query rows of a KV head per launch at 8 query tokens = GQA <= 6, no attention sinks) and F8 (head 256).  Any
++        // other layer would have its whole K / V converted to f16 at every step, so it keeps q8_0.
++        const uint32_t q8r_n_head    = hparams.n_head(il);
++        const uint32_t q8r_n_head_kv = hparams.n_head_kv(il);
++        const bool     q8r_sinks     = il < model.layers.size() && model.layers[il].attn_sinks != nullptr;
 +        auto row_type = [&](ggml_type t, uint32_t head_dim, const char * which) {
-+            if (t == GGML_TYPE_Q8_0R && head_dim % 256 != 0) {
-+                LLAMA_LOG_WARN("%s: layer %d: %s head dim %u is not a multiple of 256, q8_0 instead of q8_0r\n", __func__, il, which, head_dim);
++            if (t != GGML_TYPE_Q8_0R) {
++                return t;
++            }
++            if (head_dim != 256) {
++                LLAMA_LOG_WARN("%s: layer %d: %s head dim %u is not 256, q8_0 instead of q8_0r\n", __func__, il, which, head_dim);
++                return GGML_TYPE_Q8_0;
++            }
++            if (q8r_n_head_kv == 0 || q8r_n_head % q8r_n_head_kv != 0 || q8r_n_head / q8r_n_head_kv > 6) {
++                LLAMA_LOG_WARN("%s: layer %d: %s GQA %u/%u is above 6, q8_0 instead of q8_0r\n", __func__, il, which, q8r_n_head, q8r_n_head_kv);
++                return GGML_TYPE_Q8_0;
++            }
++            if (q8r_sinks) {
++                LLAMA_LOG_WARN("%s: layer %d: %s the layer has attention sinks, q8_0 instead of q8_0r\n", __func__, il, which);
 +                return GGML_TYPE_Q8_0;
 +            }
 +            return t;
@@ -2734,7 +2750,7 @@ index 8c3e89419..ece838d0c 100644
  
          has_k && ggml_format_name(k, "cache_%sk_l%d", name_tag, il);
          has_v && ggml_format_name(v, "cache_%sv_l%d", name_tag, il);
-@@ -1085,8 +1095,8 @@ llama_kv_cache::llama_kv_cache(
+@@ -1085,8 +1111,8 @@ llama_kv_cache::llama_kv_cache(
          kv_pool_layer pl;
          if (kv_pool_page != 0 && has_v) {
              const int64_t pool_cells = (int64_t) kv_pool_page*kv_pool_n_pages;
@@ -2746,7 +2762,7 @@ index 8c3e89419..ece838d0c 100644
              pl.inv    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, kv_pool_n_pages);
              pl.use    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, kv_pool_n_pages);
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 84644e71c..ef58600e6 100644
+index 8bab1a9d7..d00bba2e1 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -11561,6 +11561,26 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {

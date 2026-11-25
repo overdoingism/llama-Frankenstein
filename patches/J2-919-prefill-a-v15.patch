@@ -1,8 +1,8 @@
 diff --git a/common/common.cpp b/common/common.cpp
-index 017f5da44..abd3202ab 100644
+index 3a08ee05c..b7d01703e 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
-@@ -1901,6 +1901,44 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1980,6 +1980,44 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          }
          llama_memory_clear(llama_get_memory(lctx), true);
          llama_synchronize(lctx);
@@ -48,7 +48,7 @@ index 017f5da44..abd3202ab 100644
  
          // reset samplers to reset RNG state after warmup to the seeded state
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index e52e0e503..3d934b0b2 100644
+index ffcf4d230..9713e919b 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -3619,6 +3619,19 @@ common_params common_base_params_to_speculative(const common_params & params) {
@@ -123,7 +123,7 @@ index 44c6bd1c8..71a9de828 100644
  
  // Returns whether the Fast Walsh-Hadamard transform could be used.  q8_1: also write dst as Q8_1 blocks there
 diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_delta_net.cu
-index 85d1fe6fa..56d03a9ba 100644
+index 8ea066fda..23b7803f6 100644
 --- a/ggml/src/ggml-cuda/gated_delta_net.cu
 +++ b/ggml/src/ggml-cuda/gated_delta_net.cu
 @@ -1,6 +1,8 @@
@@ -200,7 +200,7 @@ index 85d1fe6fa..56d03a9ba 100644
      ggml_tensor * src_q     = dst->src[0];
      ggml_tensor * src_k     = dst->src[1];
      ggml_tensor * src_v     = dst->src[2];
-@@ -490,7 +547,24 @@ static void ggml_cuda_op_gated_delta_net_impl(
+@@ -513,7 +570,24 @@ static void ggml_cuda_op_gated_delta_net_impl(
                  const bool want_bf16_c = bf16_rdna_c && S_v == 128 && bf16_env_on;
                  if (want_bf16_c) {
                      if (GGML_CUDA_CC_IS_RDNA4(cc_c)) {
@@ -226,7 +226,7 @@ index 85d1fe6fa..56d03a9ba 100644
                      }
                      return ggml_cuda_op_gated_delta_net_chunked_bf16_gfx11(ctx, dst, state_d_ext, n_tokens_limit);
                  }
-@@ -572,6 +646,12 @@ static void ggml_cuda_op_gated_delta_net_impl(
+@@ -595,6 +669,12 @@ static void ggml_cuda_op_gated_delta_net_impl(
          }
      }
  
@@ -1532,7 +1532,7 @@ index dcfad68c6..42391e75e 100644
 +// (the n_head its dispatch would choose), 0 when it may read any of them as f32
 +int64_t ggml_cuda_gdn_bf16_head(const ggml_tensor * gdn);
 diff --git a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
-index 71747a1c6..28a5eea7c 100644
+index c91fd7d93..98fc688b8 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu
 @@ -9,6 +9,7 @@
@@ -1543,7 +1543,7 @@ index 71747a1c6..28a5eea7c 100644
  #include "ggml-cuda/acc.cuh"
  #include "ggml-cuda/add-id.cuh"
  #include "ggml-cuda/arange.cuh"
-@@ -974,6 +975,95 @@ static bool ggml_cuda_should_fuse_rms_norm_mul_rope_fwht(const ggml_cgraph * cgr
+@@ -982,6 +983,95 @@ static bool ggml_cuda_should_fuse_rms_norm_mul_rope_fwht(const ggml_cgraph * cgr
  static bool ggml_cuda_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops,
                                 std::initializer_list<enum ggml_unary_op> unary_ops);
  
@@ -1639,7 +1639,7 @@ index 71747a1c6..28a5eea7c 100644
  // ROPE alone (no Q / K norm, e.g. Llama) followed by the quantized-KV rotation: ROPE, RESHAPE, Hadamard MUL_MAT at i run as
  // one rms_norm_mul_rope_f32<.., no_norm> launch writing the rotated rows (Q: returns 2), and for K also the RESHAPE, VIEW,
  // cache SET_ROWS that follow (returns 5), with the V row's VIEW, cache SET_ROWS after that when allow_v (returns 7).  The
-@@ -1892,7 +1982,8 @@ static int ggml_cuda_count_uses(const ggml_cgraph * cgraph, const ggml_tensor *
+@@ -1920,7 +2010,8 @@ static void ggml_cuda_count_uses3(const ggml_cgraph * cgraph, const ggml_tensor
  
  // CONT(view) -> UNARY -> MUL -> decode matmul (the qwen4exp attention output gate: the gate half of each Q head):
  // the gate -> Q8_1 kernel reads the row-strided view itself, so the CONT launches nothing.  The CONT is an exact
@@ -1649,7 +1649,7 @@ index 71747a1c6..28a5eea7c 100644
  static int ggml_cuda_cont_gate_q8_1_try_fuse(ggml_backend_cuda_context * cuda_ctx, const ggml_cgraph * cgraph, int i) {
      static const bool fuse = [] { const char * e = getenv("GGML_CUDA_FUSE_CONT_GATE_Q8_1"); return e == nullptr || atoi(e) != 0; }();
      const ggml_tensor * c = cgraph->nodes[i];
-@@ -1917,7 +2008,19 @@ static int ggml_cuda_cont_gate_q8_1_try_fuse(ggml_backend_cuda_context * cuda_ct
+@@ -1945,7 +2036,19 @@ static int ggml_cuda_cont_gate_q8_1_try_fuse(ggml_backend_cuda_context * cuda_ct
      }
      const ggml_tensor * mm = ggml_cuda_find_mul_q8_1_matmul(cgraph, i + 2, mul);
      if (mm == nullptr) {
@@ -1670,7 +1670,7 @@ index 71747a1c6..28a5eea7c 100644
      }
      ggml_cuda_op_unary_mul_q8_1(*cuda_ctx, un, mul, mm, v);
      return cgraph->nodes[i + 3] == mm ? 2 : 3;
-@@ -2155,6 +2258,9 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
+@@ -2316,6 +2419,9 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
      }
      // MoE down + weighted reduction fold (owned by moe-weighted-reduction.cu): arms the down MUL_MAT_ID, fuses no node
      ggml_cuda_mwr_fold_mark(*cuda_ctx, cgraph, i);
@@ -1680,7 +1680,7 @@ index 71747a1c6..28a5eea7c 100644
      // a skipped GDN norm whose gate node was passed (taken by another fusion) or left in an earlier graph
      if (cuda_ctx->gdn_norm_pending != nullptr && (i == 0 || i > cuda_ctx->gdn_norm_gate_at)) {
          GGML_ABORT("GDN norm %s was skipped but its gate node was never reached", cuda_ctx->gdn_norm_pending->name);
-@@ -2179,6 +2285,16 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
+@@ -2341,6 +2447,16 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
      if (cuda_ctx->gdn_norm_pending != nullptr && i < cuda_ctx->gdn_norm_gate_at) {
          return 0;
      }
@@ -1697,7 +1697,7 @@ index 71747a1c6..28a5eea7c 100644
      if (const int n_cont_gate = ggml_cuda_cont_gate_q8_1_try_fuse(cuda_ctx, cgraph, i)) {
          return n_cont_gate;
      }
-@@ -2244,8 +2360,14 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
+@@ -2406,8 +2522,14 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
      // which is block-scheduling bound for the model's per-head norms.  Bit-identical to
      // rms_norm_f32<256,{true,false}> (same per-warp xor trees + 8-partial xor tree).
      // A/B / bisect kill switch: GGML_CUDA_DISABLE_NORM_ROWS=1.
@@ -1714,7 +1714,7 @@ index 71747a1c6..28a5eea7c 100644
      }
  
      // qwen4exp IQ4_NL/Q8_0 routed down projection followed by the 10-expert weighted sum (ported
-@@ -3260,6 +3382,7 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
+@@ -3427,6 +3549,7 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
      if (const int n_kv = ggml_cuda_rms_norm_mul_rope_fwht_set_rows_count(cgraph, i, kv_allow_v, ggml_cuda_info().devices[cuda_ctx->device].warp_size)) {
          ggml_cuda_op_rms_norm_mul_rope_fused(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2], nullptr, cgraph->nodes[i + 4],
                                               cgraph->nodes[i + 7], n_kv == 10 ? cgraph->nodes[i + 9] : nullptr);
@@ -1722,7 +1722,7 @@ index 71747a1c6..28a5eea7c 100644
          return n_kv - 1;
      }
  
-@@ -3315,6 +3438,7 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
+@@ -3482,6 +3605,7 @@ int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgrap
              }
          }
          ggml_cuda_op_rms_norm_mul_rope_fused(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2], nullptr, cgraph->nodes[i + 4]);
@@ -1731,7 +1731,7 @@ index 71747a1c6..28a5eea7c 100644
      }
  
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 716051b05..2fe970738 100644
+index 9e7a35de3..036f0f7fc 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -22,6 +22,8 @@
@@ -1743,7 +1743,7 @@ index 716051b05..2fe970738 100644
  #include "ggml-cuda/count-equal.cuh"
  #include "ggml-cuda/cpy.cuh"
  #include "ggml-cuda/cross-entropy-loss.cuh"
-@@ -7273,6 +7275,11 @@ bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
+@@ -7293,6 +7295,11 @@ bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
          return false;
      }
  
@@ -1755,7 +1755,7 @@ index 716051b05..2fe970738 100644
      return true;
  }
  
-@@ -7452,6 +7459,17 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+@@ -7477,6 +7484,17 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
      const int cc        = ggml_cuda_info().devices[ctx.device].cc;
      const int warp_size = ggml_cuda_info().devices[ctx.device].warp_size;
  
@@ -1773,7 +1773,7 @@ index 716051b05..2fe970738 100644
      // MMB: bf16-WMMA dequant weight GEMM (pwilkin strix-halo port). Prefill-only: the predicate
      // requires T >= GGML_CUDA_MMB_MIN_T (default 512), so the whole decode/verify band
      // (n_tokens <= 8) stays on the existing kernels and W = 1..8 is bit-identical either way.
-@@ -9619,6 +9637,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -9647,6 +9665,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
      ggml_cuda_fattn_new_graph_eval(*cuda_ctx);
      cuda_ctx->mwr_done_graph = nullptr;
      cuda_ctx->bf16_src1_cache_clear();
@@ -1782,7 +1782,7 @@ index 716051b05..2fe970738 100644
      ggml_cuda_mmb_set_active_ctx(cuda_ctx);
      ggml_cuda_mmb_begin_graph();
  
-@@ -12419,6 +12439,16 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -12497,6 +12517,16 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_get_features") == 0) {
          return (void *)ggml_backend_cuda_get_features;
      }
@@ -5589,7 +5589,7 @@ index a753d3e76..ab2c4a86a 100644
  void ggml_cuda_op_norm_gated(ggml_backend_cuda_context & ctx, const ggml_cuda_norm_gated_match & m);
  int  ggml_cuda_norm_rows_try_fuse(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i);
 diff --git a/ggml/src/ggml-cuda/norm.cu b/ggml/src/ggml-cuda/norm.cu
-index 7434c5091..269b2d84f 100644
+index 63d7b361e..d9c18e42d 100644
 --- a/ggml/src/ggml-cuda/norm.cu
 +++ b/ggml/src/ggml-cuda/norm.cu
 @@ -1,5 +1,6 @@
@@ -5599,7 +5599,7 @@ index 7434c5091..269b2d84f 100644
  #include "mmb.cuh"
  #include "mmvq.cuh"
  #include <cstdint>
-@@ -304,6 +305,113 @@ static __global__ void rms_norm_f32(const T *     x,
+@@ -398,6 +399,113 @@ static __global__ void rms_norm_f32(const T *     x,
      }
  }
  
@@ -5713,7 +5713,7 @@ index 7434c5091..269b2d84f 100644
  // Two RMS_NORM + SCALE pairs in one launch (the GDN q and k l2 norms of build_gdn_l2_norm): blocks [0, nrows) take
  // (x0, dst0), blocks [nrows, 2*nrows) take (x1, dst1).  The per-row body is rms_norm_f32<block_size, false, false, true>'s
  // (same reduction, same `scale_out * (scale * x)`), so each output is bit-identical to its own launch.
-@@ -355,6 +463,76 @@ static __global__ void rms_norm_scale_pair_f32(const float * x0, float * dst0, c
+@@ -449,6 +557,76 @@ static __global__ void rms_norm_scale_pair_f32(const float * x0, float * dst0, c
      }
  }
  
@@ -5790,7 +5790,7 @@ index 7434c5091..269b2d84f 100644
  // rms_norm followed by ggml_scale (build_gdn_l2_norm: the GDN q/k l2 norm).  The norm output is
  // rounded exactly as rms_norm_f32 writes it, and the scale is applied as scale_f32 does
  // (s * v + b), so the result is bit-identical to the two kernels it replaces.
-@@ -1153,6 +1331,41 @@ void ggml_cuda_op_rms_norm_scale_pair_fused(ggml_backend_cuda_context & ctx, ggm
+@@ -1275,6 +1453,41 @@ void ggml_cuda_op_rms_norm_scale_pair_fused(ggml_backend_cuda_context & ctx, ggm
      const int ncols = (int) x0->ne[0], nrows = (int) x0->ne[1], nchannels = (int) x0->ne[2], nsamples = (int) x0->ne[3];
      GGML_ASSERT(ncols < 1024);
  
@@ -5832,7 +5832,7 @@ index 7434c5091..269b2d84f 100644
      dim3 blocks_num(2*nrows, MIN(nchannels, UINT16_MAX), MIN(nsamples, UINT16_MAX));
      const dim3 block_dims(256, 1, 1);
      if (ggml_cuda_grid_stall_pad(blocks_num, block_dims, "rms_norm_scale_pair")) {
-@@ -1225,6 +1438,31 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor *
+@@ -1347,6 +1560,31 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor *
      const int mul_nchannels = mul_src->ne[2];
      const int mul_nsamples  = mul_src->ne[3];
  
@@ -6540,10 +6540,10 @@ index 3875c56f9..c618f6839 100644
      llama_ubatch split_simple(uint32_t n_ubatch);
  
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index adeebe748..c94660190 100644
+index be4e0e7d7..7bd67602b 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -3528,6 +3528,9 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+@@ -3569,6 +3569,9 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
          return -1;
      }
  
@@ -6554,7 +6554,7 @@ index adeebe748..c94660190 100644
      const uint32_t n_outputs_all = balloc->get_n_outputs();
  
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index ef58600e6..ab20e5ff4 100644
+index d00bba2e1..6c0d9a39b 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -14663,6 +14663,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
