@@ -294,7 +294,9 @@ with the defaults, the time per decode step the same at 8K and 0.6 % less at 110
 scales ([Lossy parts](#lossy-parts)).  With every default-off switch on together (`FRANK_KQ_BLAS=fp8b`,
 `FRANK_KQ_BLAS_OUT16`, `FRANK_KQ_BLAS_PRECONV`, `FRANK_MMVK_EXT=3`), and with K1's other modes (`f16`, `TAIL=mmq`,
 `FRANK_MXFP4_ALGOS=timed`), the same server tests gave no aborts or errors and repeatable output; that set's KLD against
-the defaults is 0.0025 / 0.0009 (zh / en, after a 30K-token prefix).
+the defaults is 0.0025 / 0.0009 (zh / en, after a 30K-token prefix).  One exception: with `FRANK_MMVK_EXT=3`, two or
+three sequences decoding in one batch gave a wrong token (IQ4 / MXFP4 weights in mixed-type groups; `2` alone does not):
+leave it unset ([SWITCHES.md](SWITCHES.md)).
 
 **2026-11-24: J2 v13, a fix** (part a as in v10.1; v11 and v12 were not published here).
 - The norm lock is removed with its switches (`FRANK_KQ_BLAS_FIXED` and its tuning; the server warns when one is set):
