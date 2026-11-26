@@ -161,6 +161,10 @@ when one is set: `FRANK_KQ_BLAS_FIXED`, `_FIXED_N`, `_FIXED_MIN_B`, `_FIXED_MIN_
 `_FIXED_PRODUCER`, `_FIXED_NOF32`.  Every K1 batch takes its own scales, as `FRANK_KQ_BLAS_FIXED=0` did (why:
 [STRUCTURE.md](STRUCTURE.md#lossy-parts)).
 
+On J3 v5.3 (2026-11-26) the Gated DeltaNet output norm fused with its SiLU gate moved to rdna-boosts, which reads its own
+name: `FRANK_FUSE_GDN_NORM_GATE_SILU` → `GGML_CUDA_FUSE_GDN_NORM_GATE_SILU` (on by default).  From J7 v2.1 the server
+warns when the old one is set.
+
 ## Related, not from this repo
 
 | variable | what it does |

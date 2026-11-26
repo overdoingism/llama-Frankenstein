@@ -226,10 +226,10 @@ index 31dc78616..18d0ea09e 100644
  
 diff --git a/common/renamed-env.cpp b/common/renamed-env.cpp
 new file mode 100644
-index 000000000..bd26f8d93
+index 000000000..050f63b50
 --- /dev/null
 +++ b/common/renamed-env.cpp
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,131 @@
 +// The switches of this patch set were renamed to FRANK_* (2026-11): a script that still sets an old name would silently get
 +// the default, so common_init() warns once for every old name it finds in the environment.  Only read at startup.
 +#include "common.h"
@@ -253,7 +253,6 @@ index 000000000..bd26f8d93
 +        { "GGML_CUDA_FA_Q8R_SW", "FRANK_FA_Q8R_SW" },
 +        { "GGML_CUDA_FUSE_CONT_GATE_CHECK", "FRANK_FUSE_CONT_GATE_CHECK" },
 +        { "GGML_CUDA_FUSE_CONT_GATE_F32", "FRANK_FUSE_CONT_GATE_F32" },
-+        { "GGML_CUDA_FUSE_GDN_NORM_GATE_SILU", "FRANK_FUSE_GDN_NORM_GATE_SILU" },
 +        { "GGML_CUDA_GDN_BF16_IN", "FRANK_GDN_BF16_IN" },
 +        { "GGML_CUDA_GDN_CONV_NORM_DEBUG", "FRANK_GDN_CONV_NORM_DEBUG" },
 +        { "GGML_CUDA_GDN_CONV_NORM_INPLACE", "FRANK_GDN_CONV_NORM_INPLACE" },
@@ -351,6 +350,11 @@ index 000000000..bd26f8d93
 +    if (getenv("FRANK_GRAPH_MAX_TOKENS") != nullptr) {
 +        LOG_WRN("FRANK_GRAPH_MAX_TOKENS is set, but it is no longer read: the release's GGML_CUDA_GRAPH_MAX_TOKENS "
 +                "replaces it (default 16)\n");
++    }
++    // retired for the release's own switch (r353): GGML_CUDA_FUSE_GDN_NORM_GATE_SILU is the release's again, not an old name
++    if (getenv("FRANK_FUSE_GDN_NORM_GATE_SILU") != nullptr) {
++        LOG_WRN("FRANK_FUSE_GDN_NORM_GATE_SILU is set, but it is no longer read: the release's GGML_CUDA_FUSE_GDN_NORM_GATE_SILU "
++                "replaces it (on by default, GGML_CUDA_FUSE_GDN_NORM_GATE_SILU=0 keeps the fusion to the sigmoid gate)\n");
 +    }
 +    // LLAMA_SPEC_ALIGN is still read, by the release's draft-mtp-adaptive alignment; ours is FRANK_SPEC_ALIGN now
 +    if (getenv("LLAMA_SPEC_ALIGN") != nullptr && getenv("FRANK_SPEC_ALIGN") == nullptr) {

@@ -7,7 +7,7 @@ Written with Claude (AI).
 The seven groups follow the order of inference.  Each is one patch, `J<n>-919-<part>-v<version>.patch`, except J2, which
 is two: `J2-919-prefill-a-v15.patch` and `J2-919-prefill-b-v15.patch` (J2 v15 is both).  They are applied in number order on
 rdna-boosts `v18-919794500-r359`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
-order: J1 attention v5, J2 prefill-a v15, J3 decode v5.3, J4 sampling v1, J5 speculative v3.1, J6 step v10.1, J7 state v2,
+order: J1 attention v5, J2 prefill-a v15, J3 decode v5.3, J4 sampling v1, J5 speculative v3.1, J6 step v10.1, J7 state v2.1,
 J2 prefill-b v15.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
 a group adapted to a new base, nothing else; its next change drops the decimal.
 
@@ -263,6 +263,11 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-26 (later): J7 v2.1.**  The startup warning for old switch names no longer lists
+`GGML_CUDA_FUSE_GDN_NORM_GATE_SILU`: since J3 v5.3 it is rdna-boosts' own switch and works, but J7 v2 said it had no
+effect.  `FRANK_FUSE_GDN_NORM_GATE_SILU` (J3's name before v5.3) now warns that it is no longer read.  Startup log only:
+the other files and the computation are unchanged.
 
 **2026-11-26: J1 v5, J2 v15 (both files), J3 v5.3, J6 v10.1, J7 v2** on rdna-boosts `v18-919794500-r359` (the same
 llama.cpp `919794500`); J4 v1 and J5 v3.1 move as they are.  J2 v14 and J6 v10, and the moves to r353 and r358, were not
