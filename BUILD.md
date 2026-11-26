@@ -58,8 +58,8 @@ applied by its own script, then this repository's eight patch files.  `llama-ser
 |---|---|---|
 | the llama.cpp checkout | `git rev-parse HEAD^{tree}` | `916941663346eb86004bed77f74e90fcf9c43126` (`release.json` field `base_tree`) |
 | `apply-all.sh` | `git rev-parse HEAD^{tree}` | `3910c43846612385fbf120d6b8ae0f1b4ecf867a` (`release.json` field `tree`); the branch tip is commit `003c88e1f2eb6297fc28fe99559a3c6a7c7545cc` (field `tip`) |
-| J1 to J7 (J2 part a only) | `git add -A`, then `git write-tree` | `dc8582d1fdad219a6f86ec2ffed8a4a76456cb69` |
-| all eight files (J2 part b last) | `git add -A`, then `git write-tree` | `547472e4b89d993480402a3e8952c61d64b3186c` |
+| J1 to J7 (J2 part a only) | `git add -A`, then `git write-tree` | `ceb0d59752364553d4ef2d25c6986fab003d7a6a` |
+| all eight files (J2 part b last) | `git add -A`, then `git write-tree` | `8584b96e851fdd8c2f8e4fac49d2662f94535c1f` |
 
 `git apply` leaves the new files untracked, so the last two checks stage everything first (that changes no file).  A build
 folder named `build*` at the top is ignored by llama.cpp's `.gitignore`; check before configuring if it lives elsewhere

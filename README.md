@@ -92,12 +92,13 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
   Prefill gives back the lock's 1.2-2.1 %.  The default output is the same as v10.1 with `FRANK_KQ_BLAS_FIXED=0` (22
   server requests on UD-Q4_K_XL with 2 slots); the other changes since v10.1 are opt-in or give the same output
   ([STRUCTURE.md](STRUCTURE.md#change-log)).
-- r359 (2026-11-26): J1 v5, J2 v15, J3 v5.3, J6 v10.1, J7 v2 on rdna-boosts `v18-919794500-r359` (J7 v2.1 the same day,
-  a startup warning only; [STRUCTURE.md](STRUCTURE.md#change-log)).  **The default output changes**: the fp8 scales of
-  K1, M4 and F8 are powers of two (J2 v15).  With that switched off (`FRANK_FP8_POW2=0`), 22 server requests on
-  UD-Q4_K_XL with 2 slots give the same text as the groups before them on r353 and r358.  With the defaults: the time per
-  decode step the same at 8K and 0.6 % less at 110K (UD-Q4_K_XL, 2 slots), the 32K prompt 2736 / 64.4 (UD-Q5_K_M; r358:
-  2737 / 61.9, the decode tokens differ), and qgate passes (KLD 1.33× / 1.10× the floor, zh / en).
+- r359 (2026-11-26): J1 v5, J2 v15, J3 v5.3, J6 v10.1, J7 v2 on rdna-boosts `v18-919794500-r359` (the same day J7 v2.1,
+  a startup warning, and J7 v3, a guard for the background state save with three or more slots;
+  [STRUCTURE.md](STRUCTURE.md#change-log)).  **The default output changes**: the fp8 scales of K1, M4 and F8 are powers
+  of two (J2 v15).  With that switched off (`FRANK_FP8_POW2=0`), 22 server requests on UD-Q4_K_XL with 2 slots give the
+  same text as the groups before them on r353 and r358.  With the defaults: the time per decode step the same at 8K and
+  0.6 % less at 110K (UD-Q4_K_XL, 2 slots), the 32K prompt 2736 / 64.4 (UD-Q5_K_M; r358: 2737 / 61.9, the decode tokens
+  differ), and qgate passes (KLD 1.33× / 1.10× the floor, zh / en).
 
 ### History
 

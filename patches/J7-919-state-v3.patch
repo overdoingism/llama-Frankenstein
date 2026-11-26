@@ -416,7 +416,7 @@ index a5196edfb..e85bac462 100644
              struct llama_context * ctx,
                           uint8_t * dst,
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index f557a777b..35641cc46 100644
+index f557a777b..7ebef6dbc 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -23,6 +23,7 @@
@@ -436,7 +436,25 @@ index f557a777b..35641cc46 100644
      for (auto & be : state_pipe_evs) {
          for (ggml_backend_event_t ev : be.second) {
              if (ev != nullptr) {
-@@ -5028,20 +5031,73 @@ private:
+@@ -2057,6 +2060,7 @@ bool llama_context::memory_update(bool optimize) {
+         gf_res_prev_active = nullptr;
+         gf_res_prev_active_alt = nullptr;
+ 
++        state_copy_guard("a memory update");
+         if (!mctx->apply()) {
+             LLAMA_LOG_ERROR("%s: failed to apply memory update\n", __func__);
+         }
+@@ -3032,6 +3036,9 @@ bool llama_context::set_adapter_cvec(
+     static const size_t GGML_DROP_RESERVE_SLACK_BYTES = (size_t) 512 << 20;
+ 
+ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
++    if (mctx && ubatch.n_seqs_unq >= 2) {
++        state_copy_guard("a ubatch of several sequences");
++    }
+     if (mctx && !mctx->apply()) {
+         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
+         ret = GGML_STATUS_FAILED;
+@@ -5028,20 +5035,73 @@ private:
  // synchronous read costs a device sync plus a bounce through the shared pinned chunk.  Instead, queue them all
  // as async copies into one reused pinned staging area, synchronize each backend once, and copy to the caller's
  // buffer on the host.  Restores are batched the same way through the same stage (llama_io_read_host, below;
@@ -515,7 +533,7 @@ index f557a777b..35641cc46 100644
  }
  
  // Pipelined batched state copies (fold r151, PR #233).  The batched copy ran the host memcpy into/out of the
-@@ -5306,38 +5362,148 @@ static bool llama_state_copy_bounces(ggml_backend_buffer_t buf) {
+@@ -5306,38 +5366,153 @@ static bool llama_state_copy_bounces(ggml_backend_buffer_t buf) {
  }
  
  class llama_io_write_host : public llama_io_write_i {
@@ -534,9 +552,8 @@ index f557a777b..35641cc46 100644
          }
 -        if (lctx == nullptr || !llama_state_async_enabled(total)) {
 +        if (lctx == nullptr || total == 0 || !llama_state_async_on()) {
-             return false;
-         }
--        std::vector<ggml_backend_t> bks(winfos.size());
++            return false;
++        }
 +        if (lctx->state_host_pinned) {
 +            return flush_direct(total);
 +        }
@@ -545,8 +562,9 @@ index f557a777b..35641cc46 100644
 +            return flush_band(winfos.data(), winfos.size(), total);
 +        }
 +        if (!llama_state_async_bands(lctx)) {
-+            return false;
-+        }
+             return false;
+         }
+-        std::vector<ggml_backend_t> bks(winfos.size());
 +        const std::vector<write_info> pieces = llama_state_cut_pieces(winfos, band);
 +        const std::vector<size_t>     first  = llama_state_bands(pieces, band);
 +        for (size_t b = 0; b + 1 < first.size(); ++b) {
@@ -576,6 +594,7 @@ index f557a777b..35641cc46 100644
 +        // LLAMA_STATE_SEQ_FLAGS_COPY_STREAM: the copies go to a backend of the same device with a stream of its own; the
 +        // context's work is complete here (llama_state_seq_get_data_ext synchronizes first), so they read the state as
 +        // it is now, and the work queued after this call runs beside them (the caller keeps the sequence unchanged)
++        bool on_copy_stream = false;
 +        if (lctx->state_copy_stream) {
 +            std::vector<ggml_backend_t> cbs(bks.size());
 +            for (size_t i = 0; i < bks.size(); ++i) {
@@ -586,6 +605,7 @@ index f557a777b..35641cc46 100644
 +            }
 +            if (!cbs.empty()) {
 +                bks = std::move(cbs);
++                on_copy_stream = true;
 +            }
 +        }
 +        static const bool st_timing = getenv("LLAMA_STATE_TIMING") != nullptr;
@@ -633,6 +653,9 @@ index f557a777b..35641cc46 100644
 +        };
 +        if (!evs.empty()) {
 +            lctx->state_copy_defer(std::move(finish));
++            if (on_copy_stream) {
++                lctx->state_copy_stream_ticket = lctx->state_async_n;   // state_copy_guard
++            }
 +        } else {
 +            finish();
 +        }
@@ -671,7 +694,7 @@ index f557a777b..35641cc46 100644
          for (size_t g = 0; piped && g < n_grp; ++g) {
              for (size_t i = grp[g]; piped && i < grp[g + 1]; ++i) {
                  bool seen = false;
-@@ -5357,8 +5523,8 @@ public:
+@@ -5357,8 +5532,8 @@ public:
          size_t off = 0;
          for (size_t g = 0; g < n_grp; ++g) {
              for (size_t i = grp[g]; i < grp[g + 1]; ++i) {
@@ -682,7 +705,7 @@ index f557a777b..35641cc46 100644
              }
              if (piped) {
                  for (const auto & be : grp_ev[g]) {
-@@ -5370,27 +5536,35 @@ public:
+@@ -5370,27 +5545,35 @@ public:
              llama_state_sync_all(bks);
          }
          size_t stage_off = 0;
@@ -734,7 +757,7 @@ index f557a777b..35641cc46 100644
          }
          return true;
      }
-@@ -5468,6 +5642,8 @@ private:
+@@ -5468,6 +5651,8 @@ private:
  };
  
  class llama_io_read_host : public llama_io_read_i {
@@ -743,14 +766,15 @@ index f557a777b..35641cc46 100644
  public:
      llama_io_read_host(const uint8_t * p, size_t len, llama_context * lctx = nullptr) : ptr(p), base_ptr(p), lctx(lctx), buf_size(len) {}
  
-@@ -5484,32 +5660,87 @@ public:
+@@ -5484,32 +5669,87 @@ public:
          for (const auto & r : rinfos) {
              total += r.size;
          }
 -        if (!llama_state_async_enabled(total)) {
 +        if (total == 0 || !llama_state_async_on()) {
-+            return false;
-+        }
+             return false;
+         }
+-        std::vector<ggml_backend_t> bks(rinfos.size());
 +        if (lctx->state_host_pinned) {
 +            return flush_direct(total);
 +        }
@@ -759,9 +783,8 @@ index f557a777b..35641cc46 100644
 +            return flush_band(rinfos.data(), rinfos.size(), total);
 +        }
 +        if (!llama_state_async_bands(lctx)) {
-             return false;
-         }
--        std::vector<ggml_backend_t> bks(rinfos.size());
++            return false;
++        }
 +        const std::vector<read_info> pieces = llama_state_cut_pieces(rinfos, band);
 +        const std::vector<size_t>    first  = llama_state_bands(pieces, band);
 +        for (size_t b = 0; b + 1 < first.size(); ++b) {
@@ -840,7 +863,7 @@ index f557a777b..35641cc46 100644
          }
          static const bool st_timing = getenv("LLAMA_STATE_TIMING") != nullptr;
          const int n_copy_threads = llama_state_copy_threads(total);
-@@ -5517,11 +5748,11 @@ public:
+@@ -5517,11 +5757,11 @@ public:
          for (size_t g = 0; g + 1 < grp.size(); ++g) {
              llama_state_copy_pieces(pcs, grp[g], grp[g + 1], n_copy_threads);
              for (size_t i = grp[g]; i < grp[g + 1]; ++i) {
@@ -854,7 +877,7 @@ index f557a777b..35641cc46 100644
                             total / 1048576.0, grp.size() - 1, (ggml_time_us() - t_pack) / 1e3);
          }
          llama_state_sync_all(bks);   // the stage is reused by the next state copy on this context
-@@ -6026,7 +6257,7 @@ uint8_t * llama_context::state_stage(size_t size) {
+@@ -6026,7 +6266,7 @@ uint8_t * llama_context::state_stage(size_t size) {
      if (buf_state_stage == nullptr || ggml_backend_buffer_get_size(buf_state_stage.get()) < size) {
          buf_state_stage.reset();
          // the pinned type of the output device (the first simple device of a meta device), as for the outputs
@@ -863,7 +886,7 @@ index f557a777b..35641cc46 100644
          // ever grows, so a small save after a large one keeps the large allocation.
          auto * dev = model.dev_output();
          ggml_backend_buffer_type_t buft = dev ? ggml_backend_dev_host_buffer_type(dev) : nullptr;
-@@ -6071,6 +6302,49 @@ ggml_backend_event_t llama_context::state_pipe_event(ggml_backend_t backend, siz
+@@ -6071,6 +6311,81 @@ ggml_backend_event_t llama_context::state_pipe_event(ggml_backend_t backend, siz
      return evs[group];
  }
  
@@ -877,6 +900,38 @@ index f557a777b..35641cc46 100644
 +
 +bool llama_context::state_is_pending() {
 +    return state_pending.valid() && state_pending.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
++}
++
++// FRANK_STATE_COPY_GUARD (on unless 0; it changes no value, so FRANK_ALL=0 leaves it on): llama.h's contract for
++// LLAMA_STATE_SEQ_FLAGS_COPY_STREAM is that the saving sequence's cells stay where they are until its copies have landed,
++// but a ubatch of two or more OTHER sequences can move them -- llama_memory_recurrent::find_slot gathers a ubatch's
++// recurrent cells into one range and swaps out the cell there even when its sequence is not in the ubatch, and the graph
++// then moves the states (tools/state-async-check, 11-26: 3 of 3 such saves held a wrong recurrent state; 0 of 6 with one
++// other sequence or none) -- and a memory update (a shift, a copy) may move any cell.  Those wait for the copies first.
++// A copy still running at that point is rare (a prompt-cache save of one slot while the others batch together), and the
++// wait is only the rest of it.
++void llama_context::state_copy_guard(const char * what) {
++    if (state_copy_stream_ticket == 0) {
++        return;
++    }
++    static const bool on = [] {
++        const char * e = getenv("FRANK_STATE_COPY_GUARD");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    const bool landed = state_copy_stream_ticket < state_async_n || !state_is_pending();
++    if (!landed) {
++        if (!on) {
++            return;
++        }
++        static int n_logged = 0;
++        if (n_logged < 8) {
++            n_logged++;
++            LLAMA_LOG_WARN("%s: %s waits for a state copy still running on the copy stream (FRANK_STATE_COPY_GUARD)%s\n",
++                           __func__, what, n_logged == 8 ? "; not logged again" : "");
++        }
++        state_wait();
++    }
++    state_copy_stream_ticket = 0;
 +}
 +
 +ggml_backend_t llama_context::state_copy_backend(ggml_backend_t backend) {
@@ -913,7 +968,7 @@ index f557a777b..35641cc46 100644
  ggml_backend_t llama_context::state_backend(const ggml_tensor * t) {
      ggml_backend_buffer_t buf = t->view_src ? t->view_src->buffer : t->buffer;
      if (buf == nullptr) {
-@@ -6096,6 +6370,7 @@ size_t llama_context::state_get_size() {
+@@ -6096,6 +6411,7 @@ size_t llama_context::state_get_size() {
  }
  
  size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
@@ -921,7 +976,7 @@ index f557a777b..35641cc46 100644
      llama_io_write_host io(dst, size, this);
      try {
          return state_write_data(io);
-@@ -6106,6 +6381,7 @@ size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
+@@ -6106,6 +6422,7 @@ size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
  }
  
  size_t llama_context::state_set_data(const uint8_t * src, size_t size) {
@@ -929,7 +984,7 @@ index f557a777b..35641cc46 100644
      llama_io_read_host io(src, size, this);
      try {
          return state_read_data(io);
-@@ -6132,6 +6408,19 @@ size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_fl
+@@ -6132,6 +6449,19 @@ size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_fl
  }
  
  size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, size_t size, llama_state_seq_flags flags) {
@@ -949,7 +1004,7 @@ index f557a777b..35641cc46 100644
      std::unique_ptr<llama_io_write_i> io;
      if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
          io = std::make_unique<llama_io_write_device>(dst, size, mem_storage[seq_id], this);
-@@ -6146,11 +6435,22 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
+@@ -6146,11 +6476,22 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
          return state_seq_write_data(*io, seq_id, flags);
      } catch (const std::exception & err) {
          LLAMA_LOG_ERROR("%s: error saving state: %s\n", __func__, err.what());
@@ -972,7 +1027,7 @@ index f557a777b..35641cc46 100644
      std::unique_ptr<llama_io_read_i> io;
      if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
          // create a temporary io to read the magic and the src seq_id
-@@ -6191,6 +6491,7 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
+@@ -6191,6 +6532,7 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
  }
  
  bool llama_context::state_load_file(const char * filepath, llama_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
@@ -980,7 +1035,7 @@ index f557a777b..35641cc46 100644
      llama_file file(filepath, "rb");
  
      // sanity checks
-@@ -6234,6 +6535,7 @@ bool llama_context::state_load_file(const char * filepath, llama_token * tokens_
+@@ -6234,6 +6576,7 @@ bool llama_context::state_load_file(const char * filepath, llama_token * tokens_
  }
  
  bool llama_context::state_save_file(const char * filepath, const llama_token * tokens, size_t n_token_count) {
@@ -988,7 +1043,7 @@ index f557a777b..35641cc46 100644
      llama_file file(filepath, "wb");
  
      file.write_u32(LLAMA_SESSION_MAGIC);
-@@ -6251,6 +6553,7 @@ bool llama_context::state_save_file(const char * filepath, const llama_token * t
+@@ -6251,6 +6594,7 @@ bool llama_context::state_save_file(const char * filepath, const llama_token * t
  }
  
  size_t llama_context::state_seq_load_file(llama_seq_id seq_id, const char * filepath, llama_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
@@ -996,7 +1051,7 @@ index f557a777b..35641cc46 100644
      llama_file file(filepath, "rb");
  
      // version checks
-@@ -6305,6 +6608,7 @@ size_t llama_context::state_seq_load_file(llama_seq_id seq_id, const char * file
+@@ -6305,6 +6649,7 @@ size_t llama_context::state_seq_load_file(llama_seq_id seq_id, const char * file
  }
  
  size_t llama_context::state_seq_save_file(llama_seq_id seq_id, const char * filepath, const llama_token * tokens, size_t n_token_count) {
@@ -1004,7 +1059,7 @@ index f557a777b..35641cc46 100644
      llama_file file(filepath, "wb");
  
      file.write_u32(LLAMA_STATE_SEQ_MAGIC);
-@@ -6370,6 +6674,10 @@ size_t llama_context::state_read_data(llama_io_read_i & io) {
+@@ -6370,6 +6715,10 @@ size_t llama_context::state_read_data(llama_io_read_i & io) {
      return io.n_bytes();
  }
  
@@ -1015,7 +1070,7 @@ index f557a777b..35641cc46 100644
  size_t llama_context::state_seq_write_data(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
      if (memory) {
          memory->state_write(io, seq_id, flags);
-@@ -7572,11 +7880,32 @@ size_t llama_state_seq_get_size_ext(llama_context * ctx, llama_seq_id seq_id, ll
+@@ -7572,11 +7921,32 @@ size_t llama_state_seq_get_size_ext(llama_context * ctx, llama_seq_id seq_id, ll
      return ctx->state_seq_get_size(seq_id, flags);
  }
  
@@ -1049,7 +1104,7 @@ index f557a777b..35641cc46 100644
      ctx->synchronize();
  
 diff --git a/src/llama-context.h b/src/llama-context.h
-index ee5d4098a..45afc0985 100644
+index ee5d4098a..4f65bc297 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -14,6 +14,8 @@
@@ -1069,7 +1124,7 @@ index ee5d4098a..45afc0985 100644
  
      size_t state_seq_get_data(llama_seq_id seq_id,       uint8_t * dst, size_t size, llama_state_seq_flags flags);
  
-@@ -194,6 +197,17 @@ struct llama_context {
+@@ -194,6 +197,21 @@ struct llama_context {
      // events for the pipelined batched state copies (llama_state_pipe_groups): one per group, created on first use
      static constexpr size_t n_state_pipe_events = 8;
      ggml_backend_event_t state_pipe_event(ggml_backend_t backend, size_t group);
@@ -1082,12 +1137,16 @@ index ee5d4098a..45afc0985 100644
 +    void state_wait();
 +    bool state_is_pending();
 +    uint64_t state_async_n = 0;   // copies handed to state_copy_defer so far (llama_state_seq_async_ticket)
++    // the ticket of the last save whose copies run on the copy stream (0 = none or landed); FRANK_STATE_COPY_GUARD makes a
++    // ubatch of two or more sequences, and a memory update, wait for them first (state_copy_guard)
++    uint64_t state_copy_stream_ticket = 0;
++    void state_copy_guard(const char * what);
 +    // LLAMA_STATE_SEQ_FLAGS_COPY_STREAM: a second backend on the device of `backend` (its own stream), nullptr if none
 +    ggml_backend_t state_copy_backend(ggml_backend_t backend);
      size_t state_seq_set_data(llama_seq_id seq_id, const uint8_t * src, size_t size, llama_state_seq_flags flags);
  
      bool state_load_file(
-@@ -563,6 +577,11 @@ private:
+@@ -563,6 +581,11 @@ private:
      // retained across saves and one buffer per context (state saves on one context must not run concurrently).
      ggml_backend_buffer_ptr buf_state_stage;
      std::vector<std::pair<ggml_backend_t, std::array<ggml_backend_event_t, n_state_pipe_events>>> state_pipe_evs;
@@ -1293,7 +1352,7 @@ index 6b32ca1ff..f0dff3aa9 100644
  };
  
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 3f0546d47..e49964033 100644
+index 3f0546d47..65170e070 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -367,11 +367,19 @@ struct server_slot {
@@ -1390,7 +1449,7 @@ index 3f0546d47..e49964033 100644
      std::vector<common_state_data> ckpt_spare;
  
      // LLAMA_SERVER_SPEC_CKPT_DEVICE: where the target's speculative checkpoint is kept -- the one saved before a verify
-@@ -1319,6 +1368,47 @@ private:
+@@ -1319,6 +1368,53 @@ private:
      }();
      static constexpr size_t SPEC_CKPT_DEVICE_HEADROOM = 512ull << 20;
  
@@ -1417,6 +1476,12 @@ index 3f0546d47..e49964033 100644
 +        const char * a = getenv("FRANK_ALL");
 +        return !(a != nullptr && a[0] == '0' && a[1] == '\0');
 +    }();
++    // ... but not with a recurrent state and three or more slots (set in load_model): another sequence's batch can move the
++    // saving sequence's recurrent cell meanwhile -- llama_memory_recurrent::find_slot gathers a batch's cells into one range,
++    // swapping out the cell that is there even when its sequence is not in the batch, and the graph then moves the states --
++    // while the copy stream reads the place the save was issued with.  With one or two slots the other slots' batch holds at
++    // most one sequence, which keeps its own cell, so nothing is moved
++    bool cache_save_async_rs = true;
 +
 +    // a context checkpoint saved with LLAMA_STATE_SEQ_FLAGS_ASYNC is still being copied (ckpt_wait); a prompt-cache copy
 +    // on the copy stream is not waited for here (finish_prompt_save)
@@ -1438,7 +1503,7 @@ index 3f0546d47..e49964033 100644
      // the one GPU the target runs on, nullptr when there are several (a split model) or none
      ggml_backend_dev_t spec_ckpt_gpu() const {
          std::vector<ggml_backend_dev_t> gpus;
-@@ -1400,6 +1490,10 @@ private:
+@@ -1400,6 +1496,10 @@ private:
              if (v->empty()) {
                  continue;
              }
@@ -1449,7 +1514,7 @@ index 3f0546d47..e49964033 100644
              if (ckpt_spare.size() < 4) {
                  ckpt_spare.push_back(std::move(*v));
              } else {
-@@ -1413,8 +1507,13 @@ private:
+@@ -1413,8 +1513,13 @@ private:
          }
      }
  
@@ -1464,7 +1529,26 @@ index 3f0546d47..e49964033 100644
          for (auto it = ckpt_spare.begin(); it != ckpt_spare.end(); ++it) {
              if (it->size() == n) {
                  common_state_data v = std::move(*it);
-@@ -1978,6 +2077,33 @@ private:
+@@ -1795,6 +1900,18 @@ private:
+         // the min position of a hybrid memory is the position of its recurrent state, not the start of the SWA window
+         n_swa_reuse = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ? 0 : n_swa;
+ 
++        {
++            const auto has_rs = [](const llama_model * m) {
++                return m != nullptr && (llama_model_is_recurrent(m) || llama_model_is_hybrid(m));
++            };
++            cache_save_async_rs = params_base.n_parallel <= 2 || !(has_rs(model_tgt) || has_rs(model_dft));
++            if (cache_save_async && !cache_save_async_rs) {
++                SRV_INF("prompt cache: saved on the main stream (FRANK_SERVER_CACHE_ASYNC needs one or two slots with a "
++                        "recurrent state: with %d, another sequence's batch may move a saving sequence's recurrent cell)\n",
++                        params_base.n_parallel);
++            }
++        }
++
+         // Necessary similarity of prompt for slot selection
+         slot_sched.slot_prompt_similarity = params_base.slot_prompt_similarity;
+ 
+@@ -1978,6 +2095,33 @@ private:
          }
          SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
  
@@ -1498,7 +1582,7 @@ index 3f0546d47..e49964033 100644
          if (params_base.n_ctx_checkpoints > 0) {
              SRV_TRC("context checkpoints enabled, max = %d, min spacing = %d\n",
                      params_base.n_ctx_checkpoints, params_base.checkpoint_min_step);
-@@ -2193,10 +2319,29 @@ private:
+@@ -2193,10 +2337,29 @@ private:
      void update_prompt_cache(server_slot & slot, const server_task & task) {
          SRV_TRC("%s", "updating prompt cache\n");
  
@@ -1521,14 +1605,14 @@ index 3f0546d47..e49964033 100644
 +            prefill = prefill || o.state != SLOT_STATE_GENERATING;
 +        }
 +        others = others && !prefill;
-+        const bool async = cache_save_async && others && lora_new.empty() && slot.prompt.lora.empty() &&
++        const bool async = cache_save_async && cache_save_async_rs && others && lora_new.empty() && slot.prompt.lora.empty() &&
 +                           !task.is_parent() && !task.is_child() &&
 +                           (task.type == SERVER_TASK_TYPE_COMPLETION || task.type == SERVER_TASK_TYPE_INFILL);
 +
          // the entry this task will restore is held out of the cache while the slot is saved, so the eviction that
          // the save may cause cannot drop it (block 12; `find` and `load` see the same prompt/tokens/lora, so the
          // entry held here is the entry the load below restores)
-@@ -2208,19 +2353,81 @@ private:
+@@ -2208,19 +2371,81 @@ private:
              }
          }
  
@@ -1547,9 +1631,9 @@ index 3f0546d47..e49964033 100644
 +        if (!async) {
 +            slot.prompt_save(*prompt_cache);
 +        }
-+
-+        prompt_cache_restore(slot, held, task.tokens, lora_new);
  
++        prompt_cache_restore(slot, held, task.tokens, lora_new);
++
 +        SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
 +        // (the LCP-similarity selection this block used to hold inline now lives in server_slot_sched,
 +        //  upstream #32154's refactor -- D7; the parking policy feeds it through get_slot_infos()/select().)
@@ -1615,7 +1699,7 @@ index 3f0546d47..e49964033 100644
      }
  
      // a restore can fail for want of KV cells that another idle slot holds (unified KV cache): move idle slots to the prompt
-@@ -2251,6 +2458,7 @@ private:
+@@ -2251,6 +2476,7 @@ private:
  
      // park_idle_slots: the idle slots go up first, so the low cells are free, then the slots that run come down
      void park_idle_slots_for_launch() {
@@ -1623,7 +1707,7 @@ index 3f0546d47..e49964033 100644
          if (park_supported < 0) {
              park_supported = !slots.empty() && slots[0].mem.can_park() ? 1 : 0;
              SRV_INF("idle slot parking: %s\n", park_supported ? "on" : "not supported by this KV cache, the idle slots stay where they are");
-@@ -2412,6 +2620,8 @@ private:
+@@ -2412,6 +2638,8 @@ private:
      bool try_clear_idle_slots(const server_slot * keep = nullptr) {
          bool res = false;
  
@@ -1632,7 +1716,7 @@ index 3f0546d47..e49964033 100644
          if (!params_base.kv_unified) {
              return res;
          }
-@@ -3326,8 +3536,10 @@ private:
+@@ -3326,8 +3554,10 @@ private:
                  cur.data_dft = ckpt_take(llama_state_seq_get_size_ext(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
              }
          }
@@ -1645,7 +1729,7 @@ index 3f0546d47..e49964033 100644
          // stash the draft's speculative state with the checkpoint
          common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
  
-@@ -3561,6 +3773,11 @@ private:
+@@ -3561,6 +3791,11 @@ private:
              SRV_DBG("decoding, decline task, id_task = %d\n", task.id);
              return false;
          }
@@ -1657,7 +1741,7 @@ index 3f0546d47..e49964033 100644
  
          switch (task.type) {
              case SERVER_TASK_TYPE_COMPLETION:
-@@ -4648,6 +4865,24 @@ private:
+@@ -4648,6 +4883,24 @@ private:
      }
  
      void update_slots() {
@@ -1682,7 +1766,7 @@ index 3f0546d47..e49964033 100644
          step_loop_try();
  #ifdef DEBUG_TIMINGS
          static int64_t t_prev = 0;
-@@ -5242,6 +5477,11 @@ private:
+@@ -5242,6 +5495,11 @@ private:
                      return;
                  }
  
@@ -1694,7 +1778,7 @@ index 3f0546d47..e49964033 100644
                  // this slot still has a prompt to be processed
                  if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                      const auto & input_tokens = slot.task->tokens;
-@@ -5750,6 +5990,9 @@ private:
+@@ -5750,6 +6008,9 @@ private:
  
                              bool should_break = false;
                              for (int offset : checkpoint_offsets) {
@@ -1704,7 +1788,7 @@ index 3f0546d47..e49964033 100644
                                  const int n_last = std::min(n_batch, offset);
                                  if (slot.task->n_tokens() == slot.prompt.n_tokens() + n_last) {
                                      should_break = true;
-@@ -5770,7 +6013,17 @@ private:
+@@ -5770,7 +6031,17 @@ private:
  
                      const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
  

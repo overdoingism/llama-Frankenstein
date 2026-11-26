@@ -7,7 +7,7 @@ Written with Claude (AI).
 The seven groups follow the order of inference.  Each is one patch, `J<n>-919-<part>-v<version>.patch`, except J2, which
 is two: `J2-919-prefill-a-v15.patch` and `J2-919-prefill-b-v15.patch` (J2 v15 is both).  They are applied in number order on
 rdna-boosts `v18-919794500-r359`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
-order: J1 attention v5, J2 prefill-a v15, J3 decode v5.3, J4 sampling v1, J5 speculative v3.1, J6 step v10.1, J7 state v2.1,
+order: J1 attention v5, J2 prefill-a v15, J3 decode v5.3, J4 sampling v1, J5 speculative v3.1, J6 step v10.1, J7 state v3,
 J2 prefill-b v15.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
 a group adapted to a new base, nothing else; its next change drops the decimal.
 
@@ -247,6 +247,7 @@ attention (r359, opt-in) stays off while the loop or its slab is switched on: th
 | state copy in bands | a state above 256 MiB (the prompt cache saving or restoring a long slot) goes through the pinned stage one band at a time.  One device only | `FRANK_STATE_ASYNC_BANDS` (on with one device) | speed |
 | checkpoints in the background | a context checkpoint is saved asynchronously: the save returns once the device copies are queued, and the host copy (about 11 ms for Qwen3.8-27B's 150 MiB recurrent state, plus the draft's) runs on a worker thread beside the decode instead of before the request's first token | `FRANK_SERVER_CKPT_ASYNC` (on) | speed |
 | prompt cache in the background | when a task takes over a slot while another slot is working, the slot's previous prompt is copied to the prompt cache on a stream of its own, so the other slots go on decoding (switching slots at 30K: their longest stall 222-298 → 128-208 ms); the new task waits for the copy.  The saved data is the same; the new prompt may start an iteration later | `FRANK_SERVER_CACHE_ASYNC` (on) | speed |
+| state copies guarded | a prompt-cache save running on the copy stream reads its sequence where it was when the save began, but a batch of two or more other sequences can move that sequence's recurrent cell (the gather of a hybrid model's recurrent memory swaps out the cell in its range) and corrupt the saved state.  Such a batch, and a memory update, first wait for the copy; with a recurrent state and three or more slots the server also saves synchronously.  With one or two slots neither ever acts | `FRANK_STATE_COPY_GUARD` (on) | fix |
 | pinned pools | prompt-cache states and checkpoints live in pinned host memory sized at startup from the tensor shapes, copied straight to and from the device | `FRANK_SERVER_CACHE_PINNED`, `FRANK_SERVER_CKPT_PINNED` | speed |
 | checkpoints on the batch grid | checkpoints are cut at batch starts, so a shared prefix is split the same way whatever follows it: a request continued from the cache gives the same output as one run from scratch | `FRANK_SERVER_CKPT_ALIGN` (on) | fix |
 
@@ -263,6 +264,15 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-26 (later): J7 v3.**  The background prompt-cache save (`FRANK_SERVER_CACHE_ASYNC`, J7 v2) could save a wrong
+recurrent state with three or more slots: while its copy runs on a stream of its own, a batch of two or more other
+sequences may move the saving sequence's recurrent cell (a hybrid model's recurrent memory gathers a batch's cells into
+one range).  Measured directly: such a save differed from a synchronous one in 3 of 3 runs, and in none with one other
+sequence decoding or none.  Now a batch of several sequences, and a memory update, wait for a copy still running
+(`FRANK_STATE_COPY_GUARD`, on; `0` = off), and with a recurrent state and three or more slots the server saves
+synchronously.  With one or two slots nothing changes: 22 server requests on production's setup (2 slots) gave the same
+text as J7 v2.1, and the guard never acted.
 
 **2026-11-26 (later): docs.**  The note "do not set `FRANK_MMVK_EXT=3`" is withdrawn.  The wrong token it described was a
 measurement artefact: the server reports a token's probabilities only once its UTF-8 character is complete, so comparing
