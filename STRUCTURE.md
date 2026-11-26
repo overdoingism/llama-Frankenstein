@@ -264,6 +264,12 @@ to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
 
+**2026-11-26 (later): docs.**  The note "do not set `FRANK_MMVK_EXT=3`" is withdrawn.  The wrong token it described was a
+measurement artefact: the server reports a token's probabilities only once its UTF-8 character is complete, so comparing
+two runs' probability lists entry by entry paired different positions after they parted at a lead byte.  Compared token
+by token, those runs part at ordinary near ties (rank 2), as with the defaults; mmvk's grouped launches are bit-identical to
+single launches.
+
 **2026-11-26 (later): J7 v2.1.**  The startup warning for old switch names no longer lists
 `GGML_CUDA_FUSE_GDN_NORM_GATE_SILU`: since J3 v5.3 it is rdna-boosts' own switch and works, but J7 v2 said it had no
 effect.  `FRANK_FUSE_GDN_NORM_GATE_SILU` (J3's name before v5.3) now warns that it is no longer read.  Startup log only:
@@ -299,9 +305,7 @@ with the defaults, the time per decode step the same at 8K and 0.6 % less at 110
 scales ([Lossy parts](#lossy-parts)).  With every default-off switch on together (`FRANK_KQ_BLAS=fp8b`,
 `FRANK_KQ_BLAS_OUT16`, `FRANK_KQ_BLAS_PRECONV`, `FRANK_MMVK_EXT=3`), and with K1's other modes (`f16`, `TAIL=mmq`,
 `FRANK_MXFP4_ALGOS=timed`), the same server tests gave no aborts or errors and repeatable output; that set's KLD against
-the defaults is 0.0025 / 0.0009 (zh / en, after a 30K-token prefix).  One exception: with `FRANK_MMVK_EXT=3`, two or
-three sequences decoding in one batch gave a wrong token (IQ4 / MXFP4 weights in mixed-type groups; `2` alone does not):
-leave it unset ([SWITCHES.md](SWITCHES.md)).
+the defaults is 0.0025 / 0.0009 (zh / en, after a 30K-token prefix).
 
 **2026-11-24: J2 v13, a fix** (part a as in v10.1; v11 and v12 were not published here).
 - The norm lock is removed with its switches (`FRANK_KQ_BLAS_FIXED` and its tuning; the server warns when one is set):
