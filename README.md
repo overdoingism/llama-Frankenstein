@@ -11,7 +11,7 @@ trees and where to get each: [BUILD.md](BUILD.md).
 | | version |
 |---|---|
 | llama.cpp | master `919794500` (build `b12597`) |
-| llama-cpp-rdna-boosts | `v18-919794500-r359` |
+| llama-cpp-rdna-boosts | `v18-919794500-r368` |
 | ROCm | 10.0.0 (AMD's TheRock packages; the libraries loaded at run time come from it too) |
 | HIP compiler | the clang ROCm 10.0.0 ships: AMD clang 23.0.0git (ROCm llvm-project `8f497e0992fb`) |
 
@@ -57,48 +57,27 @@ Qwen3.8-27B, official UD-Q5_K_M, R9700, Linux; this repo's defaults and the comm
   (the rounds gave the same tokens; spread under 0.6 %).  Measured 2026-11-13.
 - KLD: the mean per token (without the largest one) over 400 teacher-forced tokens after an 8K / 32K prefix of a Chinese and
   an English text, against the same build with every switch off.  That build is plain rdna-boosts: its 512 decoded tokens
-  are the same as stock r269's with the draft, and its KLD to stock r269 is 0.  On r277 (rdna-boosts' r270-r277 change
-  multi-GPU all-reduce, host-resident MoE and loading, nothing on this path) the set gave the same tokens and log-probs as on
-  r269 and the same time per step (2026-11-14; the 32K prompt: 2738 / 63.0); on r295 (llama.cpp's 1.0 line) the same
-  again against r277 (2026-11-17; the 32K prompt: 2746 / 63.2).  In brackets, the multiple of the floor: the
+  are the same as stock r269's with the draft, and its KLD to stock r269 is 0.  In brackets, the multiple of the floor: the
   same comparison for one bit of K changed in an emulated build, at the same batch width.  Generation: batches of 1, 6 and
   16 tokens (decode, DFlash2 verification, n-gram verification), the one furthest above its floor; here always 1 and 6,
   which give the same bits.  Prompt processing: one 400-token batch, as in tools that score every token of a prompt (a
   reply's first token comes from a decode-sized batch: the prompt tail, J2).  Floor, generation: 0.0028 / 0.0008 (8K),
   0.0026 / 0.0004 (32K); prompt processing: 0.0079 / 0.0014 (8K), 0.0071 / 0.0007 (32K).
-- r327 (2026-11-21) added two defaults the table does not include: the norm lock (J2, then called 6d: K1's fp8 scales fixed for the normalized inputs
-  after the first decode step; prefill +1.6 / +2.1 / +1.2 % at 8K / 32K / 110K on UD-Q4_K_XL with 2 slots, KLD within
-  the floor of the per-batch scales on 22 kinds of content: [STRUCTURE.md](STRUCTURE.md#lossy-parts); removed in J2 v13,
-  below) and rdna-boosts' KQ
-  block table reuse (J1, the same output).
-- J2 v10 (2026-11-22) changes one more default the table does not include: Gated DeltaNet prefill runs on an own chunked
-  kernel instead of rdna-boosts' (`FRANK_GDN_OWN`).  Against J2 v9: prefill -0.3 / -0.2 / -0.2 % at 8K / 32K / 110K on
-  UD-Q4_K_XL with 2 slots, the same time per decode step and the same draft acceptance.  Its KLD against an fp32 Gated
-  DeltaNet reference is in the same range as rdna-boosts' kernel's (with K1 `f16`: -7 % over 3K prefixes, +10 % over 48K;
-  with K1 `fp8`: within the floor).
-- r329 (2026-11-22): the same groups on rdna-boosts `v17-919794500-r329`, its blocks moved to llama.cpp master
-  `919794500`.  Against r327: the same tokens (22 server requests on UD-Q4_K_XL with 2 slots; 400 tokens after a 48K
-  prefix, zh / en, with the same top-10 log-probs), the same time per step and the same draft acceptance; the 32K prompt:
-  2784 / 62.8 (r327: 2784 / 62.6).  On r329 the prefill compute buffer was 0.19 GiB larger, plain r329 as much as this
-  set: rdna-boosts' re-base had dropped its allocator rules (the GLU in place among them), and its r331 restores them.
-  Pinned at r331 from then until r359 (below): against r329, 0.19 GiB less VRAM, the same tokens and draft acceptance,
-  prefill and decode within 0.5 %.
-- J2 v13 (2026-11-24, a fix): the norm lock is removed, and every K1 batch takes its own scales again (what
-  `FRANK_KQ_BLAS_FIXED=0` did).  It fixed the scales from the first prompts after the server started and clipped later
-  inputs outside that range.  In tool-using conversations with a plain-text system prompt, the numbers in later tool
-  results lost precision in the keys and values they wrote, and replies quoting them got worse: on 22 tool-using
-  questions run twice at temperature 0, 16 of the 44 replies passed with the lock and 24 without it.  Its KLD had stayed
-  within the floor: an average over every position hides the few that must recall an exact value from the context.
-  Prefill gives back the lock's 1.2-2.1 %.  The default output is the same as v10.1 with `FRANK_KQ_BLAS_FIXED=0` (22
-  server requests on UD-Q4_K_XL with 2 slots); the other changes since v10.1 are opt-in or give the same output
-  ([STRUCTURE.md](STRUCTURE.md#change-log)).
-- r359 (2026-11-26): J1 v5, J2 v15, J3 v5.3, J6 v10.1, J7 v2 on rdna-boosts `v18-919794500-r359` (the same day J7 v2.1,
-  a startup warning, and J7 v3, a guard for the background state save with three or more slots;
-  [STRUCTURE.md](STRUCTURE.md#change-log)).  **The default output changes**: the fp8 scales of K1, M4 and F8 are powers
-  of two (J2 v15).  With that switched off (`FRANK_FP8_POW2=0`), 22 server requests on UD-Q4_K_XL with 2 slots give the
-  same text as the groups before them on r353 and r358.  With the defaults: the time per decode step the same at 8K and
-  0.6 % less at 110K (UD-Q4_K_XL, 2 slots), the 32K prompt 2736 / 64.4 (UD-Q5_K_M; r358: 2737 / 61.9, the decode tokens
-  differ), and qgate passes (KLD 1.33× / 1.10× the floor, zh / en).
+
+### Since the table
+
+The table above was measured on r269 (2026-11-13).  What changed since, newest first; the details are in the
+[change log](STRUCTURE.md#change-log).  "The 32K prompt" is the table's 32K row on UD-Q5_K_M (prefill / decode t/s; when the
+decode tokens differ, decode t/s also follows the draft acceptance).  "2 slots" is UD-Q4_K_XL with `--parallel 2`.
+
+| date | base | change | output with the defaults | speed |
+|---|---|---|---|---|
+| 2026&#8209;11&#8209;28 | r368 | J3 v5.4: IQ4_XS / IQ4_NL / MXFP4 weights through mmvk (`FRANK_MMVK_EXT=3`); J6 v11, J7 v3.1: fixes | changes where a model has those weights (UD-Q4_K_XL does); the decode-path checks against a clean reference are within those of the stock kernel ([lossy parts](STRUCTURE.md#lossy-parts)) | per step -0.5 to -0.8 % (2 slots); the 32K prompt 2734 / 62.4 (44.00 ms per step, r359: 44.10) |
+| 2026&#8209;11&#8209;26 | r359 | J2 v15: the fp8 scales of K1, M4 and F8 are powers of two | changes; qgate passes (KLD 1.33× / 1.10× the floor, zh / en); with `FRANK_FP8_POW2=0` the same text as before on 22 server requests (2 slots) | the same; the 32K prompt 2736 / 64.4 |
+| 2026&#8209;11&#8209;24 | r331 | J2 v13: the norm lock removed (a fix: it clipped later inputs, and replies quoting numbers from tool results got worse, 16 against 24 of 44 passing) | the same as before the lock | prefill gives back the lock's 1.2-2.1 % |
+| 2026&#8209;11&#8209;22 | r329, r331 | rdna-boosts on llama.cpp master `919794500`; J2 v10: Gated DeltaNet prefill on an own kernel (`FRANK_GDN_OWN`) | the same tokens on the new base; the own kernel's KLD against an fp32 Gated DeltaNet in the range of rdna-boosts' kernel's | prefill -0.2 to -0.3 %; the 32K prompt 2784 / 62.8 |
+| 2026&#8209;11&#8209;21 | r327 | the norm lock (J2, removed in v13); rdna-boosts' KQ block table reuse (J1) | the reuse: the same | the lock: prefill +1.2 to +2.1 % |
+| 2026&#8209;11&#8209;14, 11&#8209;17 | r277, r295 | bases only (r295: llama.cpp's 1.0 line) | the same tokens and log-probs as on r269 | the 32K prompt 2738 / 63.0, 2746 / 63.2 |
 
 ### History
 
@@ -121,7 +100,7 @@ here.
 | what | pinned at |
 |---|---|
 | llama.cpp | commit `919794500475862f6768c353255469dc661cb734` (master, build `b12597`) |
-| llama-cpp-rdna-boosts | release `v18-919794500-r359`, commit `a0e7e62b9dc748ecfe1902101084c46c244748fe`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v18-919794500-r359` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
+| llama-cpp-rdna-boosts | release `v18-919794500-r368`, commit `d829586b6d404d2549e980eadeedf004f476f079`, applied with its own `scripts/apply-all.sh`; the same commit is the tag `pin/v18-919794500-r368` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), kept in case the original goes away |
 | this repository | the eight patch files in [`patches/`](patches), all of them, in the order J1, J2 part a, J3 to J7, J2 part b |
 | ROCm | 10.0.0 with hipBLASLt, the HIP code compiled for gfx1201 |
 

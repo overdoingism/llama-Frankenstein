@@ -1,12 +1,11 @@
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index 9e0050591..475a499ca 100644
+index f29693d65..d594aae74 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
-@@ -320,8 +320,60 @@ struct common_sampler {
-     std::vector<llama_logit_bias> fast_bias = {};                // S2: the chain's logit biases, in the chain's order
+@@ -488,6 +488,17 @@ struct common_sampler {
      std::vector<llama_token> fast_bias_ids = {};                 // S2: the biased tokens, sorted, unique
      std::vector<std::pair<float, llama_token>> fast_top = {};    // S2: scratch
-+
+ 
 +    // reasoning guard (FRANK_REASONING_GUARD=1): an end-of-generation token sampled inside the reasoning block is
 +    // replaced by the block's end tag.  Ending the turn there leaves the answer inside the reasoning and the content
 +    // empty; with the tag the model goes on and writes the answer.  Nothing changes before that point: the token was
@@ -17,6 +16,12 @@ index 9e0050591..475a499ca 100644
 +    llama_tokens              rguard_start = {};
 +    std::vector<llama_tokens> rguard_ends  = {};
 +    llama_tokens              rguard_tail  = {};       // the last generated tokens, as many as the longest tag
++
+     struct llama_sampler * fast_pen = nullptr;   // S2: the chain's penalties sampler when the fast path reproduces it
+     float fast_pen_repeat  = 1.0f;               // S2: its parameters, read once at init
+     float fast_pen_freq    = 0.0f;
+@@ -504,6 +515,47 @@ struct common_sampler {
+     int     dbg_aff     = 0;                     // S2 census: the largest affected set seen
  };
  
 +static bool rguard_tail_matches(const llama_tokens & tail, const llama_tokens & tag) {
@@ -60,11 +65,11 @@ index 9e0050591..475a499ca 100644
 +    return gsmpl->rguard_end;
 +}
 +
- // S2: the fast path's k when every sampler ahead of top-k is a no-op for these parameters (logit bias is handled by the
- // fast path itself), else 0.  GGML_LF_FAST_TOPK=0 turns it off.
- static int common_sampler_fast_topk_k(const common_params_sampling & p) {
-@@ -648,6 +700,39 @@ struct common_sampler * common_sampler_init(
-         }
+ // S2: the fast path's k when every sampler ahead of top-k only moves the logits of a small, known set of tokens (the
+ // logit-bias set, which the fast path evaluates itself, and a penalties sampler, whose window it evaluates too), else 0.
+ // `pen_ahead` reports whether an enabled penalties sampler runs before top-k.  GGML_LF_FAST_TOPK=0 turns it off.
+@@ -840,6 +892,39 @@ struct common_sampler * common_sampler_init(
+         result->bind_penalties(pen_ahead);
      }
  
 +    {
@@ -103,7 +108,7 @@ index 9e0050591..475a499ca 100644
      return result;
  }
  
-@@ -710,6 +795,10 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
+@@ -912,6 +997,10 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
      llama_sampler_accept(gsmpl->chain, token);
  
      gsmpl->prev.push_back(token);
@@ -114,7 +119,7 @@ index 9e0050591..475a499ca 100644
  }
  
  void common_sampler_reset(struct common_sampler * gsmpl) {
-@@ -734,6 +823,13 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
+@@ -936,6 +1025,13 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
          /* .fast_k  */ gsmpl->fast_k,
          /* .fast_bias */ gsmpl->fast_bias,
          /* .fast_bias_ids */ gsmpl->fast_bias_ids,
@@ -126,9 +131,9 @@ index 9e0050591..475a499ca 100644
 +        /* .rguard_ends */ gsmpl->rguard_ends,
 +        /* .rguard_tail */ gsmpl->rguard_tail,
      };
- }
  
-@@ -756,6 +852,12 @@ void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
+     // S2: the clone's chain is a deep copy, so the penalties sampler is a different object than the source's
+@@ -970,6 +1066,12 @@ void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
      dst->cur_p.data = src->cur_p.data ? dst->cur.data() : nullptr; // re-point to dst's buffer
      dst->rng        = src->rng;
      dst->t_total_us = src->t_total_us;
@@ -141,7 +146,7 @@ index 9e0050591..475a499ca 100644
  }
  
  void common_perf_print(const struct llama_context * ctx, const struct common_sampler * gsmpl) {
-@@ -812,7 +914,7 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
+@@ -1026,7 +1128,7 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
      return gsmpl->chain;
  }
  
@@ -150,7 +155,7 @@ index 9e0050591..475a499ca 100644
      llama_synchronize(ctx);
  
      // start measuring sampling time after the llama_context synchronization in order to not measure any ongoing async operations
-@@ -901,6 +1003,10 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
+@@ -1115,6 +1217,10 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
      return id;
  }
  
@@ -161,7 +166,7 @@ index 9e0050591..475a499ca 100644
  std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {
      GGML_ASSERT(idxs.size() == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
  
-@@ -1007,8 +1113,12 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
+@@ -1221,8 +1327,12 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
          }
  
          if (q_x > 0.0f && (p_x >= q_x || uni(gsmpl->rng) < p_x / q_x)) {
@@ -176,7 +181,7 @@ index 9e0050591..475a499ca 100644
              continue;
          }
  
-@@ -1036,6 +1146,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
+@@ -1250,6 +1360,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
              }
          }
  

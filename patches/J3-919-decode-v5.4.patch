@@ -1,5 +1,5 @@
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index 5581be05f..4bd7dd00b 100644
+index af7b6c1ee..56a760762 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
 @@ -411,6 +411,7 @@ extern "C" {
@@ -18,7 +18,7 @@ index 5581be05f..4bd7dd00b 100644
  
          GGML_OP_UNARY,
  
-@@ -2675,6 +2677,57 @@ extern "C" {
+@@ -2685,6 +2687,57 @@ extern "C" {
              int64_t               K,
              int64_t               n_rs_batch);
  
@@ -76,7 +76,7 @@ index 5581be05f..4bd7dd00b 100644
      // DSA lightning indexer
      //
      // q:       [n_embd_idx, n_head_idx, n_batch, ne3 ]
-@@ -2807,6 +2860,19 @@ extern "C" {
+@@ -2817,6 +2870,19 @@ extern "C" {
              struct ggml_tensor  * inject,
              int64_t               hc);
  
@@ -942,7 +942,7 @@ index 98fc688b8..aadc58896 100644
      if (const int n_hc_combine_mix = ggml_cuda_hc_combine_mix_try_fuse(*cuda_ctx, cgraph, i)) {
          return n_hc_combine_mix;
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 036f0f7fc..cae7e51f9 100644
+index d450cbea2..331ffc58c 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -23,6 +23,8 @@
@@ -962,7 +962,7 @@ index 036f0f7fc..cae7e51f9 100644
  #include "ggml-cuda/ssm-scan.cuh"
  #include "ggml-cuda/sum.cuh"
  #include "ggml-cuda/sumrows.cuh"
-@@ -7494,6 +7497,16 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+@@ -7537,6 +7540,16 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
          ggml_cuda_lf_mxfp4_mul_mat(ctx, src0, src1, dst);
          return;
      }
@@ -979,7 +979,7 @@ index 036f0f7fc..cae7e51f9 100644
  
      // MMB: bf16-WMMA dequant weight GEMM (pwilkin strix-halo port). Prefill-only: the predicate
      // requires T >= GGML_CUDA_MMB_MIN_T (default 512), so the whole decode/verify band
-@@ -8206,6 +8219,9 @@ bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tens
+@@ -8249,6 +8262,9 @@ bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tens
          case GGML_OP_GATED_DELTA_NET:
              ggml_cuda_op_gated_delta_net(ctx, dst);
              break;
@@ -989,7 +989,7 @@ index 036f0f7fc..cae7e51f9 100644
          case GGML_OP_DSV4_HC_COMB:
              ggml_cuda_op_dsv4_hc_comb(ctx, dst);
              break;
-@@ -8221,6 +8237,9 @@ bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tens
+@@ -8264,6 +8280,9 @@ bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tens
          case GGML_OP_HC_COMBINE:
              ggml_cuda_op_hc_combine(ctx, dst);
              break;
@@ -999,7 +999,7 @@ index 036f0f7fc..cae7e51f9 100644
          case GGML_OP_RWKV_WKV7:
              ggml_cuda_op_rwkv_wkv7(ctx, dst);
              break;
-@@ -9893,6 +9912,22 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
+@@ -9936,6 +9955,22 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
      const bool marks_only  = params != nullptr && params->marks_only;
      const bool allocs_only = params != nullptr && params->allocs_only;
  
@@ -1022,7 +1022,7 @@ index 036f0f7fc..cae7e51f9 100644
      if (!allocs_only) {
      // BF16-only mark lifetime: clear on the first optimize after a compute, or when the first split
      // of a new graph is seen (the scheduler optimizes every split of one graph before computing any
-@@ -11722,6 +11757,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11765,6 +11800,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
              return true;
          case GGML_OP_GATED_DELTA_NET:
              return ggml_are_same_stride(op->src[0], op->src[1]);
@@ -1033,7 +1033,7 @@ index 036f0f7fc..cae7e51f9 100644
          case GGML_OP_DSV4_HC_COMB:
              return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
                  op->src[2]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
-@@ -11747,6 +11786,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11790,6 +11829,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                  (op->src[4] == nullptr || op->src[4]->type == GGML_TYPE_F32 || op->src[4]->type == GGML_TYPE_Q8_0) &&
                  op->type == GGML_TYPE_F32;
          case GGML_OP_HC_COMBINE:
@@ -1041,7 +1041,7 @@ index 036f0f7fc..cae7e51f9 100644
              return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
                  op->src[2]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
          case GGML_OP_FLASH_ATTN_EXT:
-@@ -12517,6 +12557,10 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -12593,6 +12633,10 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_get_features") == 0) {
          return (void *)ggml_backend_cuda_get_features;
      }
@@ -1639,7 +1639,7 @@ index 000000000..1320a747e
 +void ggml_cuda_head_int2_prepare(ggml_backend_cuda_context & ctx, ggml_cgraph * cgraph);
 diff --git a/ggml/src/ggml-cuda/mmvk.cu b/ggml/src/ggml-cuda/mmvk.cu
 new file mode 100644
-index 000000000..f1b95facd
+index 000000000..111d4ac47
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/mmvk.cu
 @@ -0,0 +1,463 @@
@@ -1679,11 +1679,11 @@ index 000000000..f1b95facd
 +    return m == 3 || m == 4 || ((m == 1 || m == 2) && mmvk_speculative.load(std::memory_order_relaxed));
 +}
 +
-+// FRANK_MMVK_EXT (bit mask, default 1): 1 = groups may mix weight types (bit-identical to same-type groups),
-+// 2 = also IQ4_XS / IQ4_NL / MXFP4 (their stock kernel already holds ~97% of the bandwidth at 6 columns: no gain on
-+// UD-Q4_K_XL, values change; opt-in)
++// FRANK_MMVK_EXT (bit mask, default 3): 1 = groups may mix weight types (bit-identical to same-type groups),
++// 2 = also IQ4_XS / IQ4_NL / MXFP4 (values change; on UD-Q4_K_XL -0.5..-0.8 % per decode / verify step).
++// =1 keeps those three types on their stock kernel.
 +int mmvk_ext() {
-+    static const int e = getenv("FRANK_MMVK_EXT") ? atoi(getenv("FRANK_MMVK_EXT")) : 1;
++    static const int e = getenv("FRANK_MMVK_EXT") ? atoi(getenv("FRANK_MMVK_EXT")) : 3;
 +    return e;
 +}
 +
@@ -2108,7 +2108,7 @@ index 000000000..f1b95facd
 +}
 diff --git a/ggml/src/ggml-cuda/mmvk.cuh b/ggml/src/ggml-cuda/mmvk.cuh
 new file mode 100644
-index 000000000..8b71ce48c
+index 000000000..31df25be9
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/mmvk.cuh
 @@ -0,0 +1,29 @@
@@ -2120,7 +2120,7 @@ index 000000000..8b71ce48c
 +// 32-lane butterfly) does not depend on the column count, so decode and verify stay bit-identical to each other; integer
 +// dot products and scales are MMVQ's, only the float summation order differs from MMVQ.
 +// FRANK_MMVK=1: single launches; =2: also groups the MUL_MATs that read the same src1 into one launch ("tetris"),
-+// weight types mixed within a group (FRANK_MMVK_EXT bit 1, default on; bit 2 adds IQ4_XS / IQ4_NL / MXFP4, opt-in).
++// weight types mixed within a group (FRANK_MMVK_EXT bit 1, default on; bit 2 adds IQ4_XS / IQ4_NL / MXFP4, default on).
 +// 1 and 2 run only when the program verifies speculative drafts (one-token decode alone is faster on the stock kernel);
 +// 3 and 4 are the same, always; 0 = off.  Unset: 2 (FRANK_ALL=0: off).
 +bool ggml_cuda_mmvk_takes(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst);
@@ -2142,7 +2142,7 @@ index 000000000..8b71ce48c
 +void ggml_cuda_mmvk_rows_gather(const ggml_tensor * src0, const block_q8_1 * Y, int64_t stride_col_y, const int * rows,
 +                                const int * counts, int cap, int ncols, float * vals, cudaStream_t stream);
 diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
-index 07ffe5555..17f147313 100644
+index 6e608c628..61c2825b3 100644
 --- a/ggml/src/ggml-cuda/mmvq.cu
 +++ b/ggml/src/ggml-cuda/mmvq.cu
 @@ -3,6 +3,7 @@
@@ -2153,7 +2153,7 @@ index 07ffe5555..17f147313 100644
  #include "moe-expert-cache.h"   // Phase 1b: moe_cache_enabled/moe_cache_get_cold (the UVA cold seam)
  #include "moe-weighted-reduction.cuh"   // ggml_cuda_mwr_exact: the reduction's ONE arithmetic knob
  #include "quantize.cuh"
-@@ -2113,7 +2114,9 @@ static __device__ __forceinline__ float ssm_op_sigmoid(float x) {
+@@ -2126,7 +2127,9 @@ static __device__ __forceinline__ float ssm_op_sigmoid(float x) {
  // Grid: (nrows, 1), block: (warp_size, nwarps), nwarps per row. Each workgroup
  // computes one row of both outputs for all ncols tokens; each token keeps the
  // single-token accumulation order, so the verify band matches decode bit for bit.
@@ -2164,7 +2164,7 @@ index 07ffe5555..17f147313 100644
  static __global__ void ssm_gate_beta_fused_q8_0(
          const void * vx_alpha, const void * vx_beta, const block_q8_1 * y,
          const float * dt, const float * ssm_a,
-@@ -2133,7 +2136,7 @@ static __global__ void ssm_gate_beta_fused_q8_0(
+@@ -2146,7 +2149,7 @@ static __global__ void ssm_gate_beta_fused_q8_0(
      float sum_alpha[ncols] = { 0.0f };
      float sum_beta[ncols]  = { 0.0f };
      const int blocks_per_iter = vdr * nwarps*warp_size / qi;
@@ -2173,7 +2173,7 @@ index 07ffe5555..17f147313 100644
          const int kby = kbx; // qk == QK8_1
          const int kqs = vdr * (tid % (qi/vdr));
  #pragma unroll
-@@ -2141,6 +2144,17 @@ static __global__ void ssm_gate_beta_fused_q8_0(
+@@ -2154,6 +2157,17 @@ static __global__ void ssm_gate_beta_fused_q8_0(
              sum_alpha[j] += vec_dot_q8_0_q8_1(w_alpha, &y[j*stride_col_y + kby], kbx, kqs);
              sum_beta[j]  += vec_dot_q8_0_q8_1(w_beta,  &y[j*stride_col_y + kby], kbx, kqs);
          }
@@ -2191,7 +2191,7 @@ index 07ffe5555..17f147313 100644
      }
  
      // cross-warp reduction, same order as mul_mat_vec_q
-@@ -2175,6 +2189,27 @@ static __global__ void ssm_gate_beta_fused_q8_0(
+@@ -2188,6 +2202,27 @@ static __global__ void ssm_gate_beta_fused_q8_0(
      GGML_UNUSED(nrows);
  }
  
@@ -2219,7 +2219,7 @@ index 07ffe5555..17f147313 100644
  void ggml_cuda_op_ssm_gate_beta(
          ggml_backend_cuda_context & ctx,
          const ggml_tensor * src0_alpha, const ggml_tensor * src0_beta, const ggml_tensor * src1,
-@@ -2238,12 +2273,25 @@ void ggml_cuda_op_ssm_gate_beta(
+@@ -2251,12 +2286,25 @@ void ggml_cuda_op_ssm_gate_beta(
      const dim3 block_dims(32, nwarps);
      const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(block_nums, block_dims, 0, stream);
      const int stride_col_y = ne10_padded / QK8_1;
@@ -2245,7 +2245,7 @@ index 07ffe5555..17f147313 100644
      };
      const auto launch_nw = [&](auto nwarps_c) {
          switch (ncols) {
-@@ -3714,6 +3762,12 @@ bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor, const bool
+@@ -3727,6 +3775,12 @@ bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor, const bool
      bool use_mul_mat_vec_q = ggml_cuda_should_use_mmvq(src0->type, cc, src1->ne[1]) && !bad_padding_clear &&
                               src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
  
@@ -2389,7 +2389,7 @@ index d9c18e42d..49c794b67 100644
      if (ncols < 1024) {
          launch(std::integral_constant<int, 256>{});
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index c3b610fd8..aa5987b60 100644
+index fcb27ef97..a136249cd 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
 @@ -1102,6 +1102,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
@@ -2442,7 +2442,7 @@ index c3b610fd8..aa5987b60 100644
  
  static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
  
-@@ -6921,6 +6925,122 @@ struct ggml_tensor * ggml_gated_delta_net(
+@@ -6942,6 +6946,122 @@ struct ggml_tensor * ggml_gated_delta_net(
      return result;
  }
  
@@ -2565,7 +2565,7 @@ index c3b610fd8..aa5987b60 100644
  // ggml_lightning_indexer
  
  struct ggml_tensor * ggml_lightning_indexer(
-@@ -7237,6 +7357,35 @@ struct ggml_tensor * ggml_hc_combine(
+@@ -7258,6 +7378,35 @@ struct ggml_tensor * ggml_hc_combine(
      return result;
  }
  
@@ -2602,10 +2602,10 @@ index c3b610fd8..aa5987b60 100644
  
  struct ggml_hash_set ggml_hash_set_new(size_t size) {
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 7bd67602b..a04f7db81 100644
+index a93d1efda..7f0c5d9e8 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -7160,6 +7160,10 @@ bool llama_memory_can_shift(llama_memory_t mem) {
+@@ -7168,6 +7168,10 @@ bool llama_memory_can_shift(llama_memory_t mem) {
  // Returns the *actual* size of the state.
  // Intended to be used when saving to state to a buffer.
  size_t llama_state_get_size(llama_context * ctx) {
@@ -2616,7 +2616,7 @@ index 7bd67602b..a04f7db81 100644
      return ctx->state_get_size();
  }
  
-@@ -7211,6 +7215,8 @@ size_t llama_state_seq_set_data(llama_context * ctx, const uint8_t * src, size_t
+@@ -7219,6 +7223,8 @@ size_t llama_state_seq_set_data(llama_context * ctx, const uint8_t * src, size_t
  }
  
  size_t llama_state_seq_get_size_ext(llama_context * ctx, llama_seq_id seq_id, llama_state_seq_flags flags) {
@@ -3748,10 +3748,10 @@ index 6c0d9a39b..1155a7ca9 100644
      // MMA-eligible GDN shapes: whole heads, value slices, tails, and the HIP prefill threshold.
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128,   65, 1, 1));
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 0a030aa6f..f8bbb3789 100644
+index 196e0bfff..330ec7e1b 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -1539,6 +1539,22 @@ private:
+@@ -1568,6 +1568,22 @@ private:
          const bool spec_mtp = params_base.speculative.has_mtp();
          const bool has_spec = has_draft || spec_mtp;
  

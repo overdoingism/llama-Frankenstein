@@ -362,7 +362,7 @@ index 000000000..050f63b50
 +    }
 +}
 diff --git a/include/llama.h b/include/llama.h
-index a5196edfb..e85bac462 100644
+index 011ea3f44..97e88b0b5 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -1072,13 +1072,49 @@ extern "C" {
@@ -416,7 +416,7 @@ index a5196edfb..e85bac462 100644
              struct llama_context * ctx,
                           uint8_t * dst,
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index f557a777b..7ebef6dbc 100644
+index a60cbab23..b5a926acc 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -23,6 +23,7 @@
@@ -1070,7 +1070,7 @@ index f557a777b..7ebef6dbc 100644
  size_t llama_context::state_seq_write_data(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
      if (memory) {
          memory->state_write(io, seq_id, flags);
-@@ -7572,11 +7921,32 @@ size_t llama_state_seq_get_size_ext(llama_context * ctx, llama_seq_id seq_id, ll
+@@ -7580,11 +7929,32 @@ size_t llama_state_seq_get_size_ext(llama_context * ctx, llama_seq_id seq_id, ll
      return ctx->state_seq_get_size(seq_id, flags);
  }
  
@@ -1186,10 +1186,10 @@ index b666a5b8b..166e05935 100644
  
      //
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 925f36feb..1fe988eb7 100644
+index 1f909ab10..cd83c06fb 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -4450,6 +4450,39 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
+@@ -4469,6 +4469,39 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
      return gf;
  }
  
@@ -1230,7 +1230,7 @@ index 925f36feb..1fe988eb7 100644
      // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
      if (other) {
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 52ddbcd6c..22cb4c327 100644
+index 930be9912..53129acff 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
 @@ -191,6 +191,7 @@ public:
@@ -1352,7 +1352,7 @@ index 6b32ca1ff..f0dff3aa9 100644
  };
  
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 3f0546d47..65170e070 100644
+index ceb7f86e2..cfb0b6c7c 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -367,11 +367,19 @@ struct server_slot {
@@ -1419,7 +1419,7 @@ index 3f0546d47..65170e070 100644
      std::function<void(int /* id_slot */)>   callback_on_release;
      std::function<void(const server_slot &)> callback_on_reset; // called before reset()
  
-@@ -1291,6 +1317,29 @@ private:
+@@ -1320,6 +1346,29 @@ private:
          return e == nullptr || atoi(e) != 0;
      }();
  
@@ -1449,7 +1449,7 @@ index 3f0546d47..65170e070 100644
      std::vector<common_state_data> ckpt_spare;
  
      // LLAMA_SERVER_SPEC_CKPT_DEVICE: where the target's speculative checkpoint is kept -- the one saved before a verify
-@@ -1319,6 +1368,53 @@ private:
+@@ -1348,6 +1397,50 @@ private:
      }();
      static constexpr size_t SPEC_CKPT_DEVICE_HEADROOM = 512ull << 20;
  
@@ -1467,7 +1467,10 @@ index 3f0546d47..65170e070 100644
 +    // slot is working, the slot's previous prompt is copied to the prompt cache on a stream of its own (pinned entries
 +    // only), so the other slots go on decoding instead of waiting for the copy; the new task waits for it.  Race rules:
 +    // the saving slot's cells are not touched until the copies have landed (its task starts its prompt only then, it is
-+    // never parked or cleared meanwhile), and every prompt-cache save, load or eviction waits for the copy first.
++    // never parked or cleared meanwhile), and every prompt-cache save, load or eviction waits for the copy first.  With three
++    // or more slots a batch of several other sequences could still move the saving sequence's recurrent cell (find_slot
++    // gathers a batch's cells into one range); the context waits for the copy before such a batch (FRANK_STATE_COPY_GUARD,
++    // llama-context.cpp), so it is not turned off here.
 +    const bool cache_save_async = [] {
 +        const char * e = getenv("FRANK_SERVER_CACHE_ASYNC");
 +        if (e != nullptr) {
@@ -1476,12 +1479,6 @@ index 3f0546d47..65170e070 100644
 +        const char * a = getenv("FRANK_ALL");
 +        return !(a != nullptr && a[0] == '0' && a[1] == '\0');
 +    }();
-+    // ... but not with a recurrent state and three or more slots (set in load_model): another sequence's batch can move the
-+    // saving sequence's recurrent cell meanwhile -- llama_memory_recurrent::find_slot gathers a batch's cells into one range,
-+    // swapping out the cell that is there even when its sequence is not in the batch, and the graph then moves the states --
-+    // while the copy stream reads the place the save was issued with.  With one or two slots the other slots' batch holds at
-+    // most one sequence, which keeps its own cell, so nothing is moved
-+    bool cache_save_async_rs = true;
 +
 +    // a context checkpoint saved with LLAMA_STATE_SEQ_FLAGS_ASYNC is still being copied (ckpt_wait); a prompt-cache copy
 +    // on the copy stream is not waited for here (finish_prompt_save)
@@ -1503,7 +1500,7 @@ index 3f0546d47..65170e070 100644
      // the one GPU the target runs on, nullptr when there are several (a split model) or none
      ggml_backend_dev_t spec_ckpt_gpu() const {
          std::vector<ggml_backend_dev_t> gpus;
-@@ -1400,6 +1496,10 @@ private:
+@@ -1429,6 +1522,10 @@ private:
              if (v->empty()) {
                  continue;
              }
@@ -1514,7 +1511,7 @@ index 3f0546d47..65170e070 100644
              if (ckpt_spare.size() < 4) {
                  ckpt_spare.push_back(std::move(*v));
              } else {
-@@ -1413,8 +1513,13 @@ private:
+@@ -1442,8 +1539,13 @@ private:
          }
      }
  
@@ -1529,26 +1526,7 @@ index 3f0546d47..65170e070 100644
          for (auto it = ckpt_spare.begin(); it != ckpt_spare.end(); ++it) {
              if (it->size() == n) {
                  common_state_data v = std::move(*it);
-@@ -1795,6 +1900,18 @@ private:
-         // the min position of a hybrid memory is the position of its recurrent state, not the start of the SWA window
-         n_swa_reuse = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ? 0 : n_swa;
- 
-+        {
-+            const auto has_rs = [](const llama_model * m) {
-+                return m != nullptr && (llama_model_is_recurrent(m) || llama_model_is_hybrid(m));
-+            };
-+            cache_save_async_rs = params_base.n_parallel <= 2 || !(has_rs(model_tgt) || has_rs(model_dft));
-+            if (cache_save_async && !cache_save_async_rs) {
-+                SRV_INF("prompt cache: saved on the main stream (FRANK_SERVER_CACHE_ASYNC needs one or two slots with a "
-+                        "recurrent state: with %d, another sequence's batch may move a saving sequence's recurrent cell)\n",
-+                        params_base.n_parallel);
-+            }
-+        }
-+
-         // Necessary similarity of prompt for slot selection
-         slot_sched.slot_prompt_similarity = params_base.slot_prompt_similarity;
- 
-@@ -1978,6 +2095,33 @@ private:
+@@ -2020,6 +2122,33 @@ private:
          }
          SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
  
@@ -1582,7 +1560,7 @@ index 3f0546d47..65170e070 100644
          if (params_base.n_ctx_checkpoints > 0) {
              SRV_TRC("context checkpoints enabled, max = %d, min spacing = %d\n",
                      params_base.n_ctx_checkpoints, params_base.checkpoint_min_step);
-@@ -2193,10 +2337,29 @@ private:
+@@ -2277,10 +2406,29 @@ private:
      void update_prompt_cache(server_slot & slot, const server_task & task) {
          SRV_TRC("%s", "updating prompt cache\n");
  
@@ -1605,14 +1583,14 @@ index 3f0546d47..65170e070 100644
 +            prefill = prefill || o.state != SLOT_STATE_GENERATING;
 +        }
 +        others = others && !prefill;
-+        const bool async = cache_save_async && cache_save_async_rs && others && lora_new.empty() && slot.prompt.lora.empty() &&
++        const bool async = cache_save_async && others && lora_new.empty() && slot.prompt.lora.empty() &&
 +                           !task.is_parent() && !task.is_child() &&
 +                           (task.type == SERVER_TASK_TYPE_COMPLETION || task.type == SERVER_TASK_TYPE_INFILL);
 +
          // the entry this task will restore is held out of the cache while the slot is saved, so the eviction that
          // the save may cause cannot drop it (block 12; `find` and `load` see the same prompt/tokens/lora, so the
          // entry held here is the entry the load below restores)
-@@ -2208,19 +2371,81 @@ private:
+@@ -2292,19 +2440,81 @@ private:
              }
          }
  
@@ -1631,9 +1609,9 @@ index 3f0546d47..65170e070 100644
 +        if (!async) {
 +            slot.prompt_save(*prompt_cache);
 +        }
- 
-+        prompt_cache_restore(slot, held, task.tokens, lora_new);
 +
++        prompt_cache_restore(slot, held, task.tokens, lora_new);
+ 
 +        SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
 +        // (the LCP-similarity selection this block used to hold inline now lives in server_slot_sched,
 +        //  upstream #32154's refactor -- D7; the parking policy feeds it through get_slot_infos()/select().)
@@ -1699,7 +1677,7 @@ index 3f0546d47..65170e070 100644
      }
  
      // a restore can fail for want of KV cells that another idle slot holds (unified KV cache): move idle slots to the prompt
-@@ -2251,6 +2476,7 @@ private:
+@@ -2335,6 +2545,7 @@ private:
  
      // park_idle_slots: the idle slots go up first, so the low cells are free, then the slots that run come down
      void park_idle_slots_for_launch() {
@@ -1707,7 +1685,7 @@ index 3f0546d47..65170e070 100644
          if (park_supported < 0) {
              park_supported = !slots.empty() && slots[0].mem.can_park() ? 1 : 0;
              SRV_INF("idle slot parking: %s\n", park_supported ? "on" : "not supported by this KV cache, the idle slots stay where they are");
-@@ -2412,6 +2638,8 @@ private:
+@@ -2496,6 +2707,8 @@ private:
      bool try_clear_idle_slots(const server_slot * keep = nullptr) {
          bool res = false;
  
@@ -1716,7 +1694,7 @@ index 3f0546d47..65170e070 100644
          if (!params_base.kv_unified) {
              return res;
          }
-@@ -3326,8 +3554,10 @@ private:
+@@ -3410,8 +3623,10 @@ private:
                  cur.data_dft = ckpt_take(llama_state_seq_get_size_ext(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
              }
          }
@@ -1729,7 +1707,7 @@ index 3f0546d47..65170e070 100644
          // stash the draft's speculative state with the checkpoint
          common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
  
-@@ -3561,6 +3791,11 @@ private:
+@@ -3645,6 +3860,11 @@ private:
              SRV_DBG("decoding, decline task, id_task = %d\n", task.id);
              return false;
          }
@@ -1741,7 +1719,7 @@ index 3f0546d47..65170e070 100644
  
          switch (task.type) {
              case SERVER_TASK_TYPE_COMPLETION:
-@@ -4648,6 +4883,24 @@ private:
+@@ -4736,6 +4956,24 @@ private:
      }
  
      void update_slots() {
@@ -1766,7 +1744,7 @@ index 3f0546d47..65170e070 100644
          step_loop_try();
  #ifdef DEBUG_TIMINGS
          static int64_t t_prev = 0;
-@@ -5242,6 +5495,11 @@ private:
+@@ -5350,6 +5588,11 @@ private:
                      return;
                  }
  
@@ -1778,7 +1756,7 @@ index 3f0546d47..65170e070 100644
                  // this slot still has a prompt to be processed
                  if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                      const auto & input_tokens = slot.task->tokens;
-@@ -5750,6 +6008,9 @@ private:
+@@ -5858,6 +6101,9 @@ private:
  
                              bool should_break = false;
                              for (int offset : checkpoint_offsets) {
@@ -1788,7 +1766,7 @@ index 3f0546d47..65170e070 100644
                                  const int n_last = std::min(n_batch, offset);
                                  if (slot.task->n_tokens() == slot.prompt.n_tokens() + n_last) {
                                      should_break = true;
-@@ -5770,7 +6031,17 @@ private:
+@@ -5878,7 +6124,17 @@ private:
  
                      const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
  
@@ -1808,7 +1786,7 @@ index 3f0546d47..65170e070 100644
                      const bool is_user_start = spans.is_user_start(n_tokens_start);
                      const bool is_last_user_message = n_tokens_start == last_user_pos;
 diff --git a/tools/server/server-slot-sched.cpp b/tools/server/server-slot-sched.cpp
-index c6e2738aa..1b5c8562f 100644
+index bd2eed2a6..1fd36ac68 100644
 --- a/tools/server/server-slot-sched.cpp
 +++ b/tools/server/server-slot-sched.cpp
 @@ -3,8 +3,20 @@
@@ -2133,14 +2111,15 @@ index c6e2738aa..1b5c8562f 100644
                      SRV_WRN("failed to restore state with size %zu\n", size);
  
 diff --git a/tools/server/server-slot-sched.h b/tools/server/server-slot-sched.h
-index 1005ee09a..5a60f24c4 100644
+index 29ac89cc0..d39a2f3b6 100644
 --- a/tools/server/server-slot-sched.h
 +++ b/tools/server/server-slot-sched.h
-@@ -3,8 +3,12 @@
+@@ -3,9 +3,13 @@
  #include "server-common.h"
  #include "server-task.h"
  
 +#include <atomic>
+ #include <functional>
  #include <list>
 +#include <map>
  #include <memory>
@@ -2149,7 +2128,7 @@ index 1005ee09a..5a60f24c4 100644
  #include <vector>
  
  // which prompt goes to which slot: slot prompt state, prompt cache and slot selection
-@@ -53,9 +57,82 @@ struct server_prompt {
+@@ -54,9 +58,82 @@ struct server_prompt {
      server_prompt_reuse get_reuse(int32_t n_prefix, bool has_new_tokens, int32_t n_swa, llama_pos pos_min) const;
  };
  
@@ -2234,7 +2213,7 @@ index 1005ee09a..5a60f24c4 100644
  
      size_t size() const {
          return main.size() + drft.size();
-@@ -100,8 +177,8 @@ struct server_prompt_cache {
+@@ -101,8 +178,8 @@ struct server_prompt_cache {
      size_t n_tokens() const;
  
      // a buffer of n bytes (a spare one if one is large enough), and the way back for a buffer that is no longer needed

@@ -1731,7 +1731,7 @@ index c91fd7d93..98fc688b8 100644
      }
  
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 9e7a35de3..036f0f7fc 100644
+index 2cdd59d6c..d450cbea2 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -22,6 +22,8 @@
@@ -1743,7 +1743,7 @@ index 9e7a35de3..036f0f7fc 100644
  #include "ggml-cuda/count-equal.cuh"
  #include "ggml-cuda/cpy.cuh"
  #include "ggml-cuda/cross-entropy-loss.cuh"
-@@ -7293,6 +7295,11 @@ bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
+@@ -7336,6 +7338,11 @@ bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
          return false;
      }
  
@@ -1755,7 +1755,7 @@ index 9e7a35de3..036f0f7fc 100644
      return true;
  }
  
-@@ -7477,6 +7484,17 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+@@ -7520,6 +7527,17 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
      const int cc        = ggml_cuda_info().devices[ctx.device].cc;
      const int warp_size = ggml_cuda_info().devices[ctx.device].warp_size;
  
@@ -1773,7 +1773,7 @@ index 9e7a35de3..036f0f7fc 100644
      // MMB: bf16-WMMA dequant weight GEMM (pwilkin strix-halo port). Prefill-only: the predicate
      // requires T >= GGML_CUDA_MMB_MIN_T (default 512), so the whole decode/verify band
      // (n_tokens <= 8) stays on the existing kernels and W = 1..8 is bit-identical either way.
-@@ -9647,6 +9665,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -9690,6 +9708,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
      ggml_cuda_fattn_new_graph_eval(*cuda_ctx);
      cuda_ctx->mwr_done_graph = nullptr;
      cuda_ctx->bf16_src1_cache_clear();
@@ -1782,7 +1782,7 @@ index 9e7a35de3..036f0f7fc 100644
      ggml_cuda_mmb_set_active_ctx(cuda_ctx);
      ggml_cuda_mmb_begin_graph();
  
-@@ -12497,6 +12517,16 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -12573,6 +12593,16 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_get_features") == 0) {
          return (void *)ggml_backend_cuda_get_features;
      }
@@ -5372,7 +5372,7 @@ index 000000000..3e02937fd
 +// the fusions that would take an MXFP4 prefill matmul (dense gate+up pair, swiglu -> mmq down) stand down for this path
 +bool ggml_cuda_lf_mxfp4_will_take(const ggml_tensor * mm);
 diff --git a/ggml/src/ggml-cuda/mmq.cu b/ggml/src/ggml-cuda/mmq.cu
-index c8739b83a..86b7906e2 100644
+index d90142a38..77290f046 100644
 --- a/ggml/src/ggml-cuda/mmq.cu
 +++ b/ggml/src/ggml-cuda/mmq.cu
 @@ -4,6 +4,8 @@
@@ -5384,7 +5384,7 @@ index c8739b83a..86b7906e2 100644
  
  #include <cstdint>
  
-@@ -986,7 +988,9 @@ int ggml_cuda_mul_mat_q_pair_try_fuse(ggml_backend_cuda_context & ctx, const ggm
+@@ -1003,7 +1005,9 @@ int ggml_cuda_mul_mat_q_pair_try_fuse(ggml_backend_cuda_context & ctx, const ggm
              : (node->op == GGML_OP_MUL_MAT &&
                 ggml_cuda_mmb_supported_mm(node->src[0], node->src[1], node) &&
                 ggml_cuda_mmb_supported_mm(node_next->src[0], node_next->src[1], node_next)));
@@ -5395,7 +5395,7 @@ index c8739b83a..86b7906e2 100644
              !(node->op == GGML_OP_MUL_MAT_ID ? !disable_pair_routed : (node->op == GGML_OP_MUL_MAT && !disable_pair_dense)) ||
              i + 1 >= cgraph->n_nodes) {
          return 0;
-@@ -1137,7 +1141,9 @@ int ggml_cuda_mul_mat_q_swiglu_dense_try_fuse(ggml_backend_cuda_context & ctx, c
+@@ -1154,7 +1158,9 @@ int ggml_cuda_mul_mat_q_swiglu_dense_try_fuse(ggml_backend_cuda_context & ctx, c
      const bool shape_ok = node->type == GGML_TYPE_F32 && ggml_is_contiguous(node) && node->ne[0] % 4 == 0 &&
          node->ne[2] == 1 && node->ne[3] == 1 && rows_ok(a) && (b == nullptr || (rows_ok(b) && ggml_are_same_shape(a, b))) &&
          a->ne[0] == (b ? node->ne[0] : 2*node->ne[0]) && a->ne[1] == node->ne[1];
@@ -6540,7 +6540,7 @@ index 3875c56f9..c618f6839 100644
      llama_ubatch split_simple(uint32_t n_ubatch);
  
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index be4e0e7d7..7bd67602b 100644
+index c8b205b18..a93d1efda 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -3569,6 +3569,9 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {

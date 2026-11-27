@@ -11,7 +11,7 @@ index dedf56bf4..35e97425b 100644
      GGML_TYPE_Q4_1,
      GGML_TYPE_IQ4_NL,
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index 5dd92aba7..5581be05f 100644
+index 5a14e5273..af7b6c1ee 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
 @@ -260,7 +260,8 @@ extern "C" {
@@ -1311,10 +1311,10 @@ index 558d46a24..c91fd7d93 100644
                 idx->type == GGML_TYPE_I64 && ggml_is_contiguous(idx) && idx->ne[0] == n_tok && ggml_nelements(idx) == n_tok;
      };
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 18362ec5b..9e7a35de3 100644
+index 72fadf225..2cdd59d6c 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -11376,6 +11376,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11419,6 +11419,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                      case GGML_TYPE_Q5_1:
                      case GGML_TYPE_Q8_0:
                      case GGML_TYPE_F8_E4M3:
@@ -1322,7 +1322,7 @@ index 18362ec5b..9e7a35de3 100644
                      case GGML_TYPE_Q2_K:
                      case GGML_TYPE_Q3_K:
                      case GGML_TYPE_Q4_K:
-@@ -11410,7 +11411,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11453,7 +11454,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                             (
                                 (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 || op->type == GGML_TYPE_F8_E4M3 ||
                                 op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
@@ -1332,7 +1332,7 @@ index 18362ec5b..9e7a35de3 100644
                                 (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_BF16)
                             ) || (
                                 op->type == GGML_TYPE_F16 && op->src[0]->type == GGML_TYPE_F16
-@@ -11450,6 +11452,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -11493,6 +11495,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                  if (src0_type == GGML_TYPE_Q8_0 && src1_type == GGML_TYPE_F32) {
                      return true;
                  }
@@ -2659,7 +2659,7 @@ index ca36d1369..8bbb82006 100644
  GGML_API size_t quantize_mxfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
  GGML_API size_t quantize_nvfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index bcff734f4..c3b610fd8 100644
+index afbd42b23..fcb27ef97 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
 @@ -751,6 +751,14 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
@@ -2677,7 +2677,7 @@ index bcff734f4..c3b610fd8 100644
      [GGML_TYPE_Q8_1] = {
          .type_name                = "q8_1",
          .blck_size                = QK8_1,
-@@ -8692,6 +8700,7 @@ size_t ggml_quantize_chunk(
+@@ -8713,6 +8721,7 @@ size_t ggml_quantize_chunk(
          case GGML_TYPE_Q5_0:    result = quantize_q5_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
          case GGML_TYPE_Q5_1:    result = quantize_q5_1   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
          case GGML_TYPE_Q8_0:    result = quantize_q8_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
@@ -2686,10 +2686,10 @@ index bcff734f4..c3b610fd8 100644
          case GGML_TYPE_NVFP4:   result = quantize_nvfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
          case GGML_TYPE_F8_E4M3: result = quantize_f8_e4m3(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 7656b95b8..be4e0e7d7 100644
+index 65ad2af70..c8b205b18 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -6717,7 +6717,8 @@ llama_context * llama_init_from_model(
+@@ -6725,7 +6725,8 @@ llama_context * llama_init_from_model(
      }
  
      if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_k)) {
@@ -2699,7 +2699,7 @@ index 7656b95b8..be4e0e7d7 100644
          for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
              if (model->hparams.n_embd_head_k(il) % blck_size != 0) {
                  LLAMA_LOG_ERROR("%s: K cache type %s with block size %u does not divide n_embd_head_k=%u\n",
-@@ -6728,7 +6729,8 @@ llama_context * llama_init_from_model(
+@@ -6736,7 +6737,8 @@ llama_context * llama_init_from_model(
      }
  
      if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_v)) {
@@ -2710,7 +2710,7 @@ index 7656b95b8..be4e0e7d7 100644
              if (model->hparams.n_embd_head_v(il) % blck_size != 0) {
                  LLAMA_LOG_ERROR("%s: V cache type %s with block size %u does not divide n_embd_head_v=%u\n",
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 8c3e89419..29534b698 100644
+index f37767617..e428419b9 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -1060,8 +1060,34 @@ llama_kv_cache::llama_kv_cache(

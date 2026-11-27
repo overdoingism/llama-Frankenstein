@@ -130,13 +130,13 @@ index 7af92e9dd..3d2958613 100644
 +    uint64_t hash(const entry_t * tokens) const;
  };
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index 475a499ca..e73f4e563 100644
+index d594aae74..bced12df8 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
-@@ -331,6 +331,10 @@ struct common_sampler {
-     llama_tokens              rguard_start = {};
-     std::vector<llama_tokens> rguard_ends  = {};
-     llama_tokens              rguard_tail  = {};       // the last generated tokens, as many as the longest tag
+@@ -513,6 +513,10 @@ struct common_sampler {
+     int64_t dbg_pen     = 0;                     // S2 census: fast-path samples whose penalty window was not empty
+     int64_t dbg_bad     = 0;                     // S2 census: self-check mismatches (GGML_LF_FAST_TOPK_SELFCHECK=1)
+     int     dbg_aff     = 0;                     // S2 census: the largest affected set seen
 +
 +    // params.spec_lenience below 1: drafted tokens accepted only through the lenience, and the sum of log(p / q) over them
 +    int32_t                   lenience_n   = 0;
@@ -144,7 +144,7 @@ index 475a499ca..e73f4e563 100644
  };
  
  static bool rguard_tail_matches(const llama_tokens & tail, const llama_tokens & tag) {
-@@ -1050,9 +1054,26 @@ static float prob_of(const llama_token_data * data, size_t n, llama_token id) {
+@@ -1264,9 +1268,26 @@ static float prob_of(const llama_token_data * data, size_t n, llama_token id) {
      return 0.0f;
  }
  
@@ -172,7 +172,7 @@ index 475a499ca..e73f4e563 100644
  std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const std::vector<std::vector<llama_token_data>> & draft_q, bool grammar_first) {
      GGML_ASSERT(idxs.size()    == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
      GGML_ASSERT(draft_q.size() == draft.size() && "draft_q must have one entry per draft token");
-@@ -1060,6 +1081,8 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
+@@ -1274,6 +1295,8 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
      std::vector<llama_token> result;
      result.reserve(idxs.size());
  
@@ -181,7 +181,7 @@ index 475a499ca..e73f4e563 100644
      // draws come from the sampler's own stream, so they stay independent of what was drafted
      std::uniform_real_distribution<float> uni(0.0f, 1.0f);
  
-@@ -1112,7 +1135,18 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
+@@ -1326,7 +1349,18 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
              }
          }
  
@@ -768,7 +768,7 @@ index 14d30193f..dce78273d 100644
  
  common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
 diff --git a/include/llama.h b/include/llama.h
-index eec23b49d..abb754846 100644
+index fd2af1476..c5a29fac3 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -673,6 +673,8 @@ extern "C" {
@@ -781,10 +781,10 @@ index eec23b49d..abb754846 100644
      // WIP r42 (TODO #42): release the context's grow-only compute buffers so the next graph re-reserves
      // them from that graph.  Used to make the MTP draft context reserve lazily (after the target's
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index a04f7db81..6af56e420 100644
+index 7f0c5d9e8..6b8873acc 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -6796,6 +6796,10 @@ uint32_t llama_n_ctx_seq(const llama_context * ctx) {
+@@ -6804,6 +6804,10 @@ uint32_t llama_n_ctx_seq(const llama_context * ctx) {
      return ctx->n_ctx_seq();
  }
  
@@ -796,7 +796,7 @@ index a04f7db81..6af56e420 100644
      return ctx->n_batch();
  }
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index f8bbb3789..618619336 100644
+index 330ec7e1b..c45459b79 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -811,6 +811,14 @@ struct server_slot {

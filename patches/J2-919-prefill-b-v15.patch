@@ -12,7 +12,7 @@ index 18d0ea09e..0e3bb2ce8 100644
  
  void common_params_print_info(const common_params & params, bool print_devices = true);
 diff --git a/common/renamed-env.cpp b/common/renamed-env.cpp
-index bd26f8d93..e3d118888 100644
+index 050f63b50..c428fce3a 100644
 --- a/common/renamed-env.cpp
 +++ b/common/renamed-env.cpp
 @@ -1,5 +1,6 @@
@@ -23,7 +23,7 @@ index bd26f8d93..e3d118888 100644
  #include "common.h"
  #include "log.h"
  
-@@ -25,8 +26,6 @@ void common_warn_renamed_env() {
+@@ -24,8 +25,6 @@ void common_warn_renamed_env() {
          { "GGML_CUDA_GDN_BF16_IN", "FRANK_GDN_BF16_IN" },
          { "GGML_CUDA_GDN_CONV_NORM_DEBUG", "FRANK_GDN_CONV_NORM_DEBUG" },
          { "GGML_CUDA_GDN_CONV_NORM_INPLACE", "FRANK_GDN_CONV_NORM_INPLACE" },
@@ -32,7 +32,7 @@ index bd26f8d93..e3d118888 100644
          { "GGML_CUDA_GDN_NT", "FRANK_GDN_NT" },
          { "GGML_CUDA_MMVK", "FRANK_MMVK" },
          { "GGML_CUDA_MMVK_EXT", "FRANK_MMVK_EXT" },
-@@ -50,13 +49,7 @@ void common_warn_renamed_env() {
+@@ -49,13 +48,7 @@ void common_warn_renamed_env() {
          { "GGML_LF_KQ_BLAS_CHUNK_MB", "FRANK_KQ_BLAS_CHUNK_MB" },
          { "GGML_LF_KQ_BLAS_DIRECT", "FRANK_KQ_BLAS_DIRECT" },
          { "GGML_LF_KQ_BLAS_DIRECT_B32", "FRANK_KQ_BLAS_DIRECT_B32" },
@@ -46,7 +46,7 @@ index bd26f8d93..e3d118888 100644
          { "GGML_LF_KQ_BLAS_LOG", "FRANK_KQ_BLAS_LOG" },
          { "GGML_LF_KQ_BLAS_MIN_T", "FRANK_KQ_BLAS_MIN_T" },
          { "GGML_LF_KQ_BLAS_SHARE", "FRANK_KQ_BLAS_SHARE" },
-@@ -107,6 +100,25 @@ void common_warn_renamed_env() {
+@@ -106,6 +99,25 @@ void common_warn_renamed_env() {
      if (getenv("GGML_CUDA_FA_Q8R_FAST") != nullptr) {
          LOG_WRN("GGML_CUDA_FA_Q8R_FAST is set, but the q8_0r fast mode was removed: the variable has no effect\n");
      }
@@ -142,10 +142,10 @@ index aadc58896..4b64de077 100644
      if (cgraph->nodes[i]->op == GGML_OP_MUL_MAT && ggml_can_fuse(cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_ADD }) &&
              ggml_cuda_lf_kq8_mul_mat_add(*cuda_ctx, cgraph->nodes[i], cgraph->nodes[i + 1])) {
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index a20fe8973..c096a34da 100644
+index a05327d2c..64071c5d1 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -7427,7 +7427,7 @@ bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
+@@ -7470,7 +7470,7 @@ bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
      }
  
      // K1: the hipBLASLt prefill GEMM (FRANK_KQ_BLAS) takes these matmuls unfused
@@ -154,7 +154,7 @@ index a20fe8973..c096a34da 100644
          return false;
      }
  
-@@ -12825,6 +12825,14 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -12901,6 +12901,14 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_lf_kq_blas_fp8_shapes") == 0) {
          return (void *)ggml_cuda_lf_kq_blas_fp8_shapes;
      }
@@ -2340,10 +2340,10 @@ index a01b182e6..2ff806135 100644
 -int ggml_cuda_lf_kq8_glu16_window(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i);
 -int ggml_cuda_lf_kq8_glu16_take(ggml_backend_cuda_context & ctx, const ggml_tensor * t);
 diff --git a/ggml/src/ggml-cuda/mmq.cu b/ggml/src/ggml-cuda/mmq.cu
-index 86b7906e2..8dda0cf81 100644
+index 77290f046..efacbd2e0 100644
 --- a/ggml/src/ggml-cuda/mmq.cu
 +++ b/ggml/src/ggml-cuda/mmq.cu
-@@ -989,7 +989,7 @@ int ggml_cuda_mul_mat_q_pair_try_fuse(ggml_backend_cuda_context & ctx, const ggm
+@@ -1006,7 +1006,7 @@ int ggml_cuda_mul_mat_q_pair_try_fuse(ggml_backend_cuda_context & ctx, const ggm
                 ggml_cuda_mmb_supported_mm(node->src[0], node->src[1], node) &&
                 ggml_cuda_mmb_supported_mm(node_next->src[0], node_next->src[1], node_next)));
      // K1: the hipBLASLt prefill GEMM (FRANK_KQ_BLAS) takes dense pairs unfused
@@ -2352,7 +2352,7 @@ index 86b7906e2..8dda0cf81 100644
      if (pair_off || mmb_pair_taken || lf_kq_pair_taken ||
              !(node->op == GGML_OP_MUL_MAT_ID ? !disable_pair_routed : (node->op == GGML_OP_MUL_MAT && !disable_pair_dense)) ||
              i + 1 >= cgraph->n_nodes) {
-@@ -1142,7 +1142,7 @@ int ggml_cuda_mul_mat_q_swiglu_dense_try_fuse(ggml_backend_cuda_context & ctx, c
+@@ -1159,7 +1159,7 @@ int ggml_cuda_mul_mat_q_swiglu_dense_try_fuse(ggml_backend_cuda_context & ctx, c
          node->ne[2] == 1 && node->ne[3] == 1 && rows_ok(a) && (b == nullptr || (rows_ok(b) && ggml_are_same_shape(a, b))) &&
          a->ne[0] == (b ? node->ne[0] : 2*node->ne[0]) && a->ne[1] == node->ne[1];
      // K1: the hipBLASLt prefill GEMM (FRANK_KQ_BLAS) takes the down projection unfused
@@ -2842,7 +2842,7 @@ index d552cc8c1..d26b31a6e 100644
              if (unsigned int * cbits = ggml_cuda_lf_kq8_amax_take(ctx, mul_node, &kc)) {
                  unary_gated_chan_amax_cuda<op>((const float *) unary_src->data, (const float *) other_src->data, (float *) mul_node->data,
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index e49964033..ee1838a25 100644
+index cfb0b6c7c..1b611b206 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -20,6 +20,9 @@
@@ -2880,7 +2880,7 @@ index e49964033..ee1838a25 100644
  
          last_nl_pos    = 0;
          generated      = {};
-@@ -1340,6 +1347,156 @@ private:
+@@ -1369,6 +1376,156 @@ private:
          return e == nullptr || atoi(e) != 0;
      }();
  
@@ -3037,7 +3037,7 @@ index e49964033..ee1838a25 100644
      std::vector<common_state_data> ckpt_spare;
  
      // LLAMA_SERVER_SPEC_CKPT_DEVICE: where the target's speculative checkpoint is kept -- the one saved before a verify
-@@ -1926,6 +2083,44 @@ private:
+@@ -1958,6 +2115,44 @@ private:
              }
          }
  
@@ -3082,7 +3082,7 @@ index e49964033..ee1838a25 100644
          slots.clear();
  
          ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
-@@ -5175,6 +5370,7 @@ private:
+@@ -5286,6 +5481,7 @@ private:
  
          // start populating the batch for this iteration
          batch.clear();
@@ -3090,7 +3090,7 @@ index e49964033..ee1838a25 100644
  
          // track if given slot can be batched with slots already in the batch
          auto & slot_batched = batch.slot_batched;
-@@ -5785,6 +5981,7 @@ private:
+@@ -5896,6 +6092,7 @@ private:
  
                          slot.stats.n_prompt_cached    = n_past;
                          slot.stats.n_prompt_processed = 0;
@@ -3098,7 +3098,7 @@ index e49964033..ee1838a25 100644
  
                          metrics.add_prompt_cached(n_past);
  
-@@ -6003,6 +6200,37 @@ private:
+@@ -6114,6 +6311,37 @@ private:
                                  break;
                              }
                          }
@@ -3136,7 +3136,7 @@ index e49964033..ee1838a25 100644
                      }
  
                      // the number of tokens added to the batch for the current slot
-@@ -6013,6 +6241,11 @@ private:
+@@ -6124,6 +6352,11 @@ private:
  
                      const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
  
@@ -3148,7 +3148,7 @@ index e49964033..ee1838a25 100644
                      bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
                      if (ckpt_align) {
                          // the batch that holds the position 4 + n_ubatch before the end, and the last 4 tokens
-@@ -6052,6 +6285,10 @@ private:
+@@ -6163,6 +6396,10 @@ private:
                          if (!is_user_start && !near_prompt_end) {
                              do_checkpoint = false;
                          }
@@ -3159,7 +3159,7 @@ index e49964033..ee1838a25 100644
                      }
  
                      const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
-@@ -6206,12 +6443,19 @@ private:
+@@ -6317,12 +6554,19 @@ private:
          }
  
          int ret = 0;

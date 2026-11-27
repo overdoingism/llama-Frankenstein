@@ -16,7 +16,7 @@ applied by its own script, then this repository's eight patch files.  `llama-ser
 | what | version |
 |---|---|
 | llama.cpp | commit `919794500475862f6768c353255469dc661cb734` (master, the build tag `b12597`, 238 commits after `v1.0.0`; also in rdna-boosts' `release.json`, field `base`) |
-| llama-cpp-rdna-boosts | release tag `v18-919794500-r359` = commit `a0e7e62b9dc748ecfe1902101084c46c244748fe`.  If the tag or the repository is gone: the tag `pin/v18-919794500-r359` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), the same commit |
+| llama-cpp-rdna-boosts | release tag `v18-919794500-r368` = commit `d829586b6d404d2549e980eadeedf004f476f079`.  If the tag or the repository is gone: the tag `pin/v18-919794500-r368` in [overdoingism/llama-cpp-rdna-boosts](https://github.com/overdoingism/llama-cpp-rdna-boosts), the same commit |
 | this repository | all eight files in `patches/`, in this order: `J1-*`, `J2-*-prefill-a-*`, `J3-*`, `J4-*`, `J5-*`, `J6-*`, `J7-*`, `J2-*-prefill-b-*` (J2 v15 is the two J2 files; part b needs J4-J7's server and state code, so it goes last) |
 | ROCm | 10.0.0 with hipBLASLt.  Linux: AMD's TheRock Python packages `rocm[libraries,devel,device-gfx1201]==10.0.0`, whose `_rocm_sdk_devel` folder is the ROCm root.  Windows: TheRock's `therock-dist-windows-gfx120X-all-10.0.0` (URL and SHA-256 in the [CI workflow](.github/workflows/windows-gfx1201.yml)).  HIP compiler: that release's clang (`AMD clang version 23.0.0git`, llvm-project `8f497e0992fb`) |
 | compilers, build tools | Linux: GCC 13.3 for C / C++, CMake 3.28, make.  Windows: the SDK's clang for C, C++ and HIP, Visual Studio 2022 (not 2026) for the libraries and tools, CMake 4.3, Ninja, Git for Windows |
@@ -57,9 +57,9 @@ applied by its own script, then this repository's eight patch files.  `llama-ser
 | after | command | tree |
 |---|---|---|
 | the llama.cpp checkout | `git rev-parse HEAD^{tree}` | `916941663346eb86004bed77f74e90fcf9c43126` (`release.json` field `base_tree`) |
-| `apply-all.sh` | `git rev-parse HEAD^{tree}` | `3910c43846612385fbf120d6b8ae0f1b4ecf867a` (`release.json` field `tree`); the branch tip is commit `003c88e1f2eb6297fc28fe99559a3c6a7c7545cc` (field `tip`) |
-| J1 to J7 (J2 part a only) | `git add -A`, then `git write-tree` | `ceb0d59752364553d4ef2d25c6986fab003d7a6a` |
-| all eight files (J2 part b last) | `git add -A`, then `git write-tree` | `8584b96e851fdd8c2f8e4fac49d2662f94535c1f` |
+| `apply-all.sh` | `git rev-parse HEAD^{tree}` | `bc7898a2cfa2f5268160579a2933ed42f6168d76` (`release.json` field `tree`); the branch tip is commit `af7a57ba8700f499fa6ca01d47470208deae8718` (field `tip`) |
+| J1 to J7 (J2 part a only) | `git add -A`, then `git write-tree` | `0b3353d4dd7b34f4991897cd0be57c0e40aee433` |
+| all eight files (J2 part b last) | `git add -A`, then `git write-tree` | `db895c97c8de6ce0299e0745b7672163a04aae47` |
 
 `git apply` leaves the new files untracked, so the last two checks stage everything first (that changes no file).  A build
 folder named `build*` at the top is ignored by llama.cpp's `.gitignore`; check before configuring if it lives elsewhere
@@ -87,8 +87,8 @@ them.
 
 All systems:
 
-- `v18-919794500-r359` is an annotated tag: `git rev-parse v18-919794500-r359` prints the tag object (`e0c20c0a...`), not
-  the commit.  Compare `git rev-parse v18-919794500-r359^{commit}` with the commit above.  The `pin/` tag in the fork
+- `v18-919794500-r368` is an annotated tag: `git rev-parse v18-919794500-r368` prints the tag object (`f09ea268...`), not
+  the commit.  Compare `git rev-parse v18-919794500-r368^{commit}` with the commit above.  The `pin/` tag in the fork
   points at the commit itself.
 - `apply-all.sh` needs a clean llama.cpp tree and no existing `rdna-boosts` branch (it sets the committer identity
   itself).  Without `jq` it skips its tree check without saying so: check the tree yourself.  If it reports that it fell

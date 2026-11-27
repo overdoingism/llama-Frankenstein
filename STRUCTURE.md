@@ -6,10 +6,10 @@ Written with Claude (AI).
 
 The seven groups follow the order of inference.  Each is one patch, `J<n>-919-<part>-v<version>.patch`, except J2, which
 is two: `J2-919-prefill-a-v15.patch` and `J2-919-prefill-b-v15.patch` (J2 v15 is both).  They are applied in number order on
-rdna-boosts `v18-919794500-r359`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
-order: J1 attention v5, J2 prefill-a v15, J3 decode v5.3, J4 sampling v1, J5 speculative v3.1, J6 step v10.1, J7 state v3,
+rdna-boosts `v18-919794500-r368`, with J2's part b last, after J7: it needs J4-J7's server and state code.  The files in
+order: J1 attention v5, J2 prefill-a v15, J3 decode v5.4, J4 sampling v1, J5 speculative v3.1, J6 step v11, J7 state v3.1,
 J2 prefill-b v15.  A group alone is not guaranteed to build; every part has a switch.  A version with a decimal (`v4.1`) is
-a group adapted to a new base, nothing else; its next change drops the decimal.
+a group adapted to a new base or a small follow-up to the version before; its next change drops the decimal.
 
 Types: `speed` = faster, the same output; `memory` = less VRAM, the same output; `speed/diff` = faster, output not
 bit-identical to the stock code but within the run-to-run floor; `speed/lossy` = faster, error above the floor;
@@ -68,6 +68,22 @@ prefix (a Q5_K_M of the same model): KLD 1.33× / 1.10× the floor (zh / en), to
 Gated DeltaNet output projections run in f16.  On the same 17 positions the KLD against an all-f16 run falls from 0.0092
 to 0.0052 (mean; the largest from 0.052 to 0.016), and two runs of the Gated DeltaNet that differ by 1e-14 at the op part
 half as much; prefill -5.0 / -4.4 / -3.4 % at 8K / 32K / 110K (UD-Q4_K_XL, 2 slots).
+
+**IQ4_XS / IQ4_NL / MXFP4 through mmvk (J3, on by default from v5.4; `FRANK_MMVK_EXT=1` keeps the stock kernel for
+them)** came after the table above: these weights' 1-8 token matmuls take mmvk's summation order instead of the stock
+kernel's.  Measured on UD-Q4_K_XL (its IQ4_XS tensors), the decode path against a clean reference (fp32 attention and an
+fp32 Gated DeltaNet); in brackets the same build with `FRANK_MMVK_EXT=1`:
+- 17 positions where replies to hard tool-using questions part on small differences: KLD 0.00279 (0.00266), top-1 193
+  (195) of 204; 400 tokens of a Chinese / an English text: 0.00186 / 0.00076 (0.00210 / 0.00077).
+- 1,076 positions that copy a number out of a tool result: KLD 0.000109 (0.000106), top-1 1,076 (1,074) of 1,076; the
+  largest single value 0.035 (0.027).
+- 22 hard tool-using questions run twice at temperature 0: 24 of 44 replies pass (fp32 attention: 24; plain llama.cpp:
+  24; plain rdna-boosts r359: 23).
+- qgate (48K prefix): KLD 1.51× / 1.56× the floor (zh / en; 1.47× / 1.46×), long-range recall chrF 0.891 (0.877), PPL of
+  the translations 4.945 (4.762; the base 4.945); 110K tokens greedy: the first different token comes at a near tie (the
+  top two 0.093 apart).
+
+Speed: per decode / verify step -0.5 / -0.7 / -0.8 % at widths 1 / 6 / 8 on UD-Q4_K_XL; prefill the same.
 
 **Lenience (J5, sampling, off by default)** changes the rule that accepts sampled drafts, not the logits, so it has no
 KLD of the kind above.  Its effect on the sampled distribution can be computed exactly at every verified position: at
@@ -168,7 +184,7 @@ Batches of 1-16 tokens apart from attention.
 
 | part | what | switch | type |
 |---|---|---|---|
-| mmvk | Q4_K / Q5_K / Q6_K matmuls of 1-8 tokens keep the activations in registers across several weight rows; the matmuls that read one input go out as one launch.  On when llama-server verifies drafts | `FRANK_MMVK` (2) | speed/diff |
+| mmvk | Q4_K / Q5_K / Q6_K matmuls of 1-8 tokens keep the activations in registers across several weight rows; the matmuls that read one input go out as one launch.  On when llama-server verifies drafts.  IQ4_XS / IQ4_NL / MXFP4 take it too (from v5.4; their values change: [lossy parts](#lossy-parts)) | `FRANK_MMVK` (2), `FRANK_MMVK_EXT` (3) | speed/diff |
 | Gated DeltaNet verification | each slot keeps two recurrent-state planes (after its last batch, and the one that batch started from) and per-token replay factors instead of one full state per draft token; a partly rejected draft is replayed.  About 1 GiB less VRAM with 2 slots on Qwen3.8-27B.  After a verify batch the state after it is not written: the next batch always starts from the state the batch started from and replays the accepted tokens, also when all were accepted (0.1-0.5% less time per step).  The verify kernel reads and writes the state with non-temporal hints | `FRANK_RS_ANCHOR` (on), `FRANK_RS_REPLAY_ALL` (on), `FRANK_GDN_NT` (on) | memory, speed |
 | fused decode | the draft model's convolution, the Gated DeltaNet convolution state, the norm before quantization in registers; one empty block against the gfx1201 grid stall on mmvk.  The output norm with the SiLU gate is rdna-boosts' since r353 (sent from here; `GGML_CUDA_FUSE_GDN_NORM_GATE_SILU`) | switches in [SWITCHES.md](SWITCHES.md); `GGML_CUDA_GRID_STALL_PAD` (rdna-boosts') | speed |
 | int2 draft head | the DFlash2 draft model's output layer is scored from a resident int2 copy of its weight (asymmetric, 64 values per group); the best 512 of each column are recomputed through mmvk, bit for bit as the plain path computes them, and the rest are set to -inf.  When the true top 16 is not among the 512, only that draft changes, never the verified output.  About 2% less time per step and 0.4 GiB more VRAM (outside `--fit`; if it cannot be allocated the plain path stays).  On with one RDNA4 GPU | `FRANK_HEAD_INT2` (on) | speed |
@@ -224,7 +240,7 @@ How a step goes to the GPU.
 
 | part | what | switch | type |
 |---|---|---|---|
-| GPU-resident loop | with drafts, a step's sampling, draft acceptance (with J4's guard, J5's lenience and J3's verification), the next input and the KQ mask are made on the device; server requests and two sequences in one step run in it.  The host checks every step it reads back (the position moved, the last token, the recurrent state's cell; for a greedy sequence also that the emitted tokens are the target's); on a mismatch the loop stops and the host path takes over | `FRANK_STEP_LOOP` (on with one GPU, a ROCm one, on Linux and Windows; off with several GPUs), `FRANK_STEP_LOOP_SEQ2` (on), `FRANK_DEVICE_INPUT_MAPPED` (on), `FRANK_STEP_CHECK` (on); rdna-boosts' `LLAMA_DEVICE_INPUT` follows the loop when unset | speed, guard |
+| GPU-resident loop | with drafts, a step's sampling, draft acceptance (with J4's guard, J5's lenience and J3's verification), the next input and the KQ mask are made on the device; server requests and two sequences in one step run in it.  The host checks every step it reads back (the position moved, the last token, the recurrent state's cell; for a greedy sequence also that the emitted tokens are the target's, with end-of-generation tokens masked as the loop masks them for a request with `ignore_eos`); on a mismatch the loop stops and the host path takes over | `FRANK_STEP_LOOP` (on with one GPU, a ROCm one, on Linux and Windows; off with several GPUs), `FRANK_STEP_LOOP_SEQ2` (on), `FRANK_DEVICE_INPUT_MAPPED` (on), `FRANK_STEP_CHECK` (on); rdna-boosts' `LLAMA_DEVICE_INPUT` follows the loop when unset | speed, guard |
 
 The loop gives greedy output identical to the host path; at temperature > 0 the draft model's placement can change a token,
 as on the host path.  A tied token embedding (a model without an output weight) is not mapped: it stays in VRAM as the
@@ -247,7 +263,7 @@ attention (r359, opt-in) stays off while the loop or its slab is switched on: th
 | state copy in bands | a state above 256 MiB (the prompt cache saving or restoring a long slot) goes through the pinned stage one band at a time.  One device only | `FRANK_STATE_ASYNC_BANDS` (on with one device) | speed |
 | checkpoints in the background | a context checkpoint is saved asynchronously: the save returns once the device copies are queued, and the host copy (about 11 ms for Qwen3.8-27B's 150 MiB recurrent state, plus the draft's) runs on a worker thread beside the decode instead of before the request's first token | `FRANK_SERVER_CKPT_ASYNC` (on) | speed |
 | prompt cache in the background | when a task takes over a slot while another slot is working, the slot's previous prompt is copied to the prompt cache on a stream of its own, so the other slots go on decoding (switching slots at 30K: their longest stall 222-298 → 128-208 ms); the new task waits for the copy.  The saved data is the same; the new prompt may start an iteration later | `FRANK_SERVER_CACHE_ASYNC` (on) | speed |
-| state copies guarded | a prompt-cache save running on the copy stream reads its sequence where it was when the save began, but a batch of two or more other sequences can move that sequence's recurrent cell (the gather of a hybrid model's recurrent memory swaps out the cell in its range) and corrupt the saved state.  Such a batch, and a memory update, first wait for the copy; with a recurrent state and three or more slots the server also saves synchronously.  With one or two slots neither ever acts | `FRANK_STATE_COPY_GUARD` (on) | fix |
+| state copies guarded | a prompt-cache save running on the copy stream reads its sequence where it was when the save began, but a batch of two or more other sequences can move that sequence's recurrent cell (the gather of a hybrid model's recurrent memory swaps out the cell in its range) and corrupt the saved state.  Such a batch, and a memory update, first wait for the copy.  With one or two slots it never acts | `FRANK_STATE_COPY_GUARD` (on) | fix |
 | pinned pools | prompt-cache states and checkpoints live in pinned host memory sized at startup from the tensor shapes, copied straight to and from the device | `FRANK_SERVER_CACHE_PINNED`, `FRANK_SERVER_CKPT_PINNED` | speed |
 | checkpoints on the batch grid | checkpoints are cut at batch starts, so a shared prefix is split the same way whatever follows it: a request continued from the cache gives the same output as one run from scratch | `FRANK_SERVER_CKPT_ALIGN` (on) | fix |
 
@@ -264,6 +280,21 @@ To stew675 and the rdna-boosts contributors; to Deadcode and the radiance contri
 to z-lab for the DFlash2 draft models; and to the authors of the papers above.
 
 ## Change log
+
+**2026-11-28: J3 v5.4, J6 v11, J7 v3.1** on rdna-boosts `v18-919794500-r368` (the same llama.cpp `919794500`); J1 v5,
+J2 v15 (both files), J4 v1 and J5 v3.1 move as they are (the lines they change are the same).  **The default output
+changes where a model has IQ4_XS / IQ4_NL / MXFP4 weights** (J3); everything else gives the same output.
+- J3 v5.4: IQ4_XS / IQ4_NL / MXFP4 take mmvk too (`FRANK_MMVK_EXT` now 3; `1` = before): per step -0.5 to -0.8 % on
+  UD-Q4_K_XL, the measurements under [lossy parts](#lossy-parts).
+- J6 v11: the host's check of a step masks the end-of-generation tokens of a request with `ignore_eos`, as the loop does.
+  Before, such a request reported a false mismatch in its first steps (3 of 3 requests with production's settings; now
+  none), and the loop handed that step back to the host.  The text is the same.
+- J7 v3.1: the server no longer saves synchronously with a recurrent state and three or more slots (J7 v3);
+  `FRANK_STATE_COPY_GUARD` covers that case.  With three slots the background saves run again, and the states restored
+  from the prompt cache are bit-identical to those of synchronous saves.
+On r368 (UD-Q4_K_XL, 2 slots): 22 server requests give the same text as these groups on r359; the time per decode step at
+8K / 110K is 38.28 / 46.06 ms (the groups on r353: 38.56 / 46.52).  The 32K prompt: UD-Q5_K_M 2734 t/s, 44.00 ms per step
+(r359: 2736, 44.10; the decode tokens differ); an MXFP4 build of the model 2775 t/s, 35.14 ms per step (r359: 2760, 36.71).
 
 **2026-11-26 (later): J7 v3.**  The background prompt-cache save (`FRANK_SERVER_CACHE_ASYNC`, J7 v2) could save a wrong
 recurrent state with three or more slots: while its copy runs on a stream of its own, a batch of two or more other
